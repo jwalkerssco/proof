@@ -108,8 +108,17 @@ function create(deps) {
     }
   }
 
-  async function _deviceCheck(personId, deviceId) {
+  async function _deviceCheck(personId, deviceId, personRole) {
     if (!deviceId) return { ok: true, needsDevice: true }; // no device id sent -- older client, don't block
+    // An admin is the approver -- they can never be made to wait on an
+    // approval, or the seeded admin locks themself out from a second browser.
+    if (personRole === "admin") {
+      await pool().query(
+        "INSERT INTO proof_devices (merch_id, device_id, approved_at) VALUES ($1,$2, now()) " +
+        "ON CONFLICT (merch_id, device_id) DO UPDATE SET last_seen = now(), approved_at = COALESCE(proof_devices.approved_at, now()), revoked_at = NULL",
+        [personId, deviceId]);
+      return { ok: true };
+    }
     const r = await pool().query(
       "SELECT device_id, revoked_at, approved_at FROM proof_devices WHERE merch_id = $1", [personId]
     );
@@ -119,12 +128,13 @@ function create(deps) {
       await pool().query("UPDATE proof_devices SET last_seen = now() WHERE merch_id = $1 AND device_id = $2", [personId, deviceId]);
       return { ok: true };
     }
-    // First device ever seen for this person: bind it automatically, no
-    // approval needed -- approval friction exists for a SECOND device, not
-    // the first login on the phone they were handed.
-    if (!r.rows.length) {
+    // No APPROVED device yet for this person: bind this one automatically.
+    // Approval friction exists for a SECOND phone, not the first login on the
+    // phone they were handed -- and a stray pending row must not count.
+    if (!r.rows.some((x) => x.approved_at && !x.revoked_at)) {
       await pool().query(
-        "INSERT INTO proof_devices (merch_id, device_id, approved_at) VALUES ($1,$2, now())",
+        "INSERT INTO proof_devices (merch_id, device_id, approved_at) VALUES ($1,$2, now()) " +
+        "ON CONFLICT (merch_id, device_id) DO UPDATE SET approved_at = now(), last_seen = now()",
         [personId, deviceId]
       );
       return { ok: true };
@@ -168,7 +178,7 @@ function create(deps) {
       return { error: "invalid" };
     }
 
-    const dev = await _deviceCheck(row.id, opts.deviceId);
+    const dev = await _deviceCheck(row.id, opts.deviceId, row.role);
     if (!dev.ok) return { error: dev.reason };
 
     await pool().query("UPDATE proof_people SET failed_attempts = 0, locked_until = NULL WHERE id = $1", [row.id]);
