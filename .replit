@@ -1,0 +1,15 @@
+entrypoint = "server.js"
+modules = ["nodejs-20", "postgresql-16"]
+run = "npm install && npm run build && npm start"
+
+[nix]
+channel = "stable-24_05"
+
+[deployment]
+build = ["sh", "-c", "npm install && npm run build"]
+run = ["node", "server.js"]
+deploymentTarget = "autoscale"
+
+[[ports]]
+localPort = 3000
+externalPort = 80
