@@ -338,18 +338,20 @@ function create(deps) {
     }
     if (!o.apply) return { preview: true, parsed: parsed.length, willClose: o.closeMissing ? missing.length : 0 };
 
-    for (const s of parsed) {
-      await pool().query(
-        "INSERT INTO proof_stores (branch_id, id, name, chain, addr, city, state, zip, route) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) " +
-        "ON CONFLICT (branch_id, id) DO UPDATE SET name=EXCLUDED.name, chain=EXCLUDED.chain, addr=EXCLUDED.addr, city=EXCLUDED.city, " +
-        "state=EXCLUDED.state, zip=EXCLUDED.zip, route=EXCLUDED.route, active=true, closed_at=NULL, updated_at=now()",
-        [branch, s.id, s.name, s.chain, s.addr, s.city, s.state, s.zip, s.route]
-      );
-    }
+    // BATCHED, not row-at-a-time: a real store list is hundreds of rows, and
+    // sequential inserts exceed the platform's request timeout -- the
+    // connection drops and the browser reports "Failed to fetch" on a
+    // perfectly good file.
+    const up = await D.batchUpsert(pool(), {
+      table: "proof_stores",
+      columns: ["branch_id", "id", "name", "chain", "addr", "city", "state", "zip", "route", "active", "closed_at", "updated_at"],
+      conflict: ["branch_id", "id"],
+      rows: parsed.map((s) => [branch, s.id, s.name, s.chain, s.addr, s.city, s.state, s.zip, s.route, true, null, new Date()]),
+    });
     if (o.closeMissing && missing.length) {
       await pool().query("UPDATE proof_stores SET active=false, closed_at=now() WHERE branch_id=$1 AND id = ANY($2)", [branch, missing]);
     }
-    return { ok: true, upserted: parsed.length, closed: o.closeMissing ? missing.length : 0 };
+    return { ok: true, upserted: up.written, duplicates: up.collapsed, closed: o.closeMissing ? missing.length : 0 };
   }
 
   /* ============================== Teams + week board ======================= */
@@ -538,6 +540,7 @@ function create(deps) {
     const map = hasHeader ? prodColMap(rows[0]) : {};
     const body = hasHeader ? rows.slice(1) : rows;
     let saved = 0, skipped = 0;
+    const keep = [];
     for (const r of body) {
       let name, itemNo;
       if (map.name != null || map.itemNo != null) {
@@ -550,11 +553,21 @@ function create(deps) {
         else { name = clip(r[0], 120); itemNo = mostlyDigits(r[1]) ? clip(r[1], 20) : ""; }
       }
       if (!name) { skipped++; continue; }
-      if (o.apply === false) { saved++; continue; }
-      await productSave(branch, { name, itemNo: itemNo || null });
+      const brand = map.brand != null ? clip(r[map.brand], 60) : null;
+      const pack = map.pack != null ? clip(r[map.pack], 40) : null;
+      keep.push([branch, deriveProductId({ name, itemNo: itemNo || null }), itemNo || null, name, brand, pack, true]);
       saved++;
     }
-    return { ok: true, saved, skipped, headerSeen: hasHeader };
+    if (o.apply === false) return { ok: true, saved, skipped, headerSeen: hasHeader };
+    // Batched for the same reason as the store upload -- a catalog is
+    // thousands of rows and row-at-a-time times the request out.
+    const up = await D.batchUpsert(pool(), {
+      table: "proof_products",
+      columns: ["branch_id", "id", "item_no", "name", "brand", "pack", "active"],
+      conflict: ["branch_id", "id"],
+      rows: keep,
+    });
+    return { ok: true, saved: up.written, skipped, duplicates: up.collapsed, headerSeen: hasHeader };
   }
 
   async function sections(branch, storeId) {

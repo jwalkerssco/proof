@@ -30,11 +30,27 @@ const TEAM_HEX = { slate: "#64748B", navy: "#0E1F3C", gold: "#E0B23C", green: "#
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0]; // business week: Monday first
 
-function jget(ui, url) { return fetch(url, { headers: ui.H() }).then((r) => r.json()); }
-function jpost(ui, url, body) { return fetch(url, { method: "POST", headers: ui.H(), body: JSON.stringify(body || {}) }).then((r) => r.json()); }
+/* Every call FAILS SOFT into { error } -- never a thrown promise. A phone in
+   a store drops its connection routinely, and an unhandled reject puts a red
+   stack over the whole app instead of a message the person can act on. A
+   non-JSON body (a proxy timeout page) lands here too. */
+async function jfetch(url, init) {
+  let r;
+  try { r = await fetch(url, init); }
+  catch (e) { return { error: "No connection — check your signal and try again.", offline: true }; }
+  const text = await r.text().catch(() => "");
+  let body = null;
+  try { body = text ? JSON.parse(text) : {}; } catch (e) {
+    return { error: r.status === 413 ? "That file is too big." : "The server didn't finish that request. Try again.", status: r.status };
+  }
+  if (!r.ok && body && !body.error) body.error = "That didn't go through (" + r.status + ").";
+  return body;
+}
+function jget(ui, url) { return jfetch(url, { headers: ui.H() }); }
+function jpost(ui, url, body) { return jfetch(url, { method: "POST", headers: ui.H(), body: JSON.stringify(body || {}) }); }
 // Multipart: the Content-Type header must be DROPPED so the browser can set
 // its own boundary. Sending ui.H() as-is uploads a file the server can't read.
-function jform(ui, url, fd) { const h = ui.H(); delete h["Content-Type"]; return fetch(url, { method: "POST", headers: h, body: fd }).then((r) => r.json()); }
+function jform(ui, url, fd) { const h = ui.H(); delete h["Content-Type"]; return jfetch(url, { method: "POST", headers: h, body: fd }); }
 function Icon({ ui, name, size, color }) { const I = ui.icons && ui.icons[name]; return I ? React.createElement(I, { size: size || 18, color: color }) : null; }
 function fmtTime(iso) { try { return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (e) { return ""; } }
 function fmtDay(ymd) { try { const [y, m, d] = String(ymd).split("-").map(Number); return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric", timeZone: "UTC" }); } catch (e) { return ymd; } }

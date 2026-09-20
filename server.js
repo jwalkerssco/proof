@@ -48,6 +48,7 @@ const PROOF = PROOF_MOD.create({
   getPool: DB.getPool, BRANCHES, SESSION_MS: AUTH.SESSION_MS,
   hashPin: AUTH.hashPin, verifyPin: AUTH.verifyPin, makeToken: AUTH.makeToken,
   _sessionEstablish: AUTH._sessionEstablish, revokeSessionsFor: AUTH.revokeSessionsFor,
+  batchUpsert: DB.batchUpsert,
 });
 
 const app = express();
@@ -66,7 +67,7 @@ const wrap = (fn) => async (req, res) => {
   try { const out = await fn(req); if (out && out.error) return res.status(out.pending ? 200 : 400).json(out); res.json(out); }
   catch (e) { console.error("[proof]", req.method, req.path, e && e.message); res.status(503).json({ error: "unavailable" }); }
 };
-const MARKER = "proof-0.2.0";
+const MARKER = "proof-0.2.1";
 
 app.get("/api/health", (req, res) => res.json({ ok: true, ready, marker: MARKER, node: process.version, at: new Date().toISOString() }));
 app.get("/api/migrations", requireRole("proofadmin"), wrap(() => DB.listMigrations()));
