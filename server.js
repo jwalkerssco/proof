@@ -12,10 +12,16 @@ const fs = require("fs");
 const express = require("express");
 const cron = require("node-cron");
 
+const multer = require("multer");
 const DB = require("./lib/db");
 const AUTH = require("./lib/auth").create(DB.getPool);
+const SHEET = require("./lib/sheet");
 const SCHEMA = require("./proof/schema");
 const PROOF_MOD = require("./proof");
+
+// 15 MB covers any realistic store or product export; held in memory, never
+// written to disk -- the rows go straight into Postgres and the buffer dies.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
 /* ---- branches: a small code registry, mirrored into a table for FKs ---- */
 const BRANCHES = {
@@ -60,7 +66,7 @@ const wrap = (fn) => async (req, res) => {
   try { const out = await fn(req); if (out && out.error) return res.status(out.pending ? 200 : 400).json(out); res.json(out); }
   catch (e) { console.error("[proof]", req.method, req.path, e && e.message); res.status(503).json({ error: "unavailable" }); }
 };
-const MARKER = "proof-0.1.1";
+const MARKER = "proof-0.2.0";
 
 app.get("/api/health", (req, res) => res.json({ ok: true, ready, marker: MARKER, node: process.version, at: new Date().toISOString() }));
 app.get("/api/migrations", requireRole("proofadmin"), wrap(() => DB.listMigrations()));
@@ -85,6 +91,19 @@ app.get("/api/devices/:merchId", requireRole("proofadmin"), wrap((req) => PROOF.
 /* ---- stores ---- */
 app.get("/api/stores", requireRole("proof", "proofadmin"), wrap((req) => PROOF.stores(req.session.branch, { route: req.query.route, q: req.query.q, limit: req.query.limit, includeClosed: req.query.includeClosed === "1" })));
 app.post("/api/stores/upload", requireRole("proofadmin"), wrap((req) => { const b = req.body || {}; return PROOF.uploadStores(req.session.branch, b.rows, { apply: !!b.apply, closeMissing: !!b.closeMissing, force: !!b.force }); }));
+/* File upload: .xlsx / .xls / .csv straight out of a spreadsheet. Same
+   preview-then-apply contract as the paste path -- the flags ride as form
+   fields because multipart carries no JSON body. */
+app.post("/api/stores/upload-file", requireRole("proofadmin"), upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file was attached." });
+    const parsed = SHEET.parseWorkbook(req.file.buffer);
+    if (parsed.error) return res.status(400).json(parsed);
+    const b = req.body || {};
+    const out = await PROOF.uploadStores(req.session.branch, parsed.rows, { apply: b.apply === "1", closeMissing: b.closeMissing === "1", force: b.force === "1" });
+    res.status(out && out.error && !out.preview ? 400 : 200).json(Object.assign({ file: req.file.originalname, sheet: parsed.sheet, sheets: parsed.sheets, headerRow: parsed.headerRow }, out));
+  } catch (e) { console.error("[proof] stores/upload-file", e && e.message); res.status(503).json({ error: "Couldn't read that file." }); }
+});
 app.get("/api/stores/:id/detail", requireRole("proof", "proofadmin"), wrap((req) => PROOF.storeDetail(req.session.branch, req.params.id)));
 app.get("/api/stores/:id/sections", requireRole("proof", "proofadmin"), wrap((req) => PROOF.sections(req.session.branch, req.params.id)));
 app.post("/api/stores/:id/sections", requireRole("proofadmin"), wrap((req) => PROOF.sectionSave(req.session.branch, req.params.id, req.body || {})));
@@ -120,6 +139,15 @@ app.post("/api/blocks/:id/members", requireRole("proofadmin"), wrap((req) => {
 app.get("/api/products", requireRole("proof", "proofadmin"), wrap((req) => PROOF.products(req.session.branch, { q: req.query.q, limit: req.query.limit })));
 app.post("/api/products", requireRole("proofadmin"), wrap((req) => { const b = req.body || {}; return b.rows ? PROOF.productsUpload(req.session.branch, b.rows, { apply: !!b.apply }) : PROOF.productSave(req.session.branch, b); }));
 app.post("/api/products/:id/remove", requireRole("proofadmin"), wrap((req) => PROOF.productRemove(req.session.branch, req.params.id)));
+app.post("/api/products/upload-file", requireRole("proofadmin"), upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file was attached." });
+    const parsed = SHEET.parseWorkbook(req.file.buffer);
+    if (parsed.error) return res.status(400).json(parsed);
+    const out = await PROOF.productsUpload(req.session.branch, parsed.rows, { apply: (req.body || {}).apply === "1" });
+    res.status(out && out.error ? 400 : 200).json(Object.assign({ file: req.file.originalname, sheet: parsed.sheet, sheets: parsed.sheets }, out));
+  } catch (e) { console.error("[proof] products/upload-file", e && e.message); res.status(503).json({ error: "Couldn't read that file." }); }
+});
 
 /* ---- visits: every write requires an open visit owned by the caller ---- */
 app.get("/api/visits/open", requireRole("proof", "proofadmin"), wrap((req) => PROOF.blockedOpenVisit(req.session).then((v) => ({ open: !!v, ...(v || {}) }))));

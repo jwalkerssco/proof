@@ -32,6 +32,9 @@ const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0]; // business week: Monday first
 
 function jget(ui, url) { return fetch(url, { headers: ui.H() }).then((r) => r.json()); }
 function jpost(ui, url, body) { return fetch(url, { method: "POST", headers: ui.H(), body: JSON.stringify(body || {}) }).then((r) => r.json()); }
+// Multipart: the Content-Type header must be DROPPED so the browser can set
+// its own boundary. Sending ui.H() as-is uploads a file the server can't read.
+function jform(ui, url, fd) { const h = ui.H(); delete h["Content-Type"]; return fetch(url, { method: "POST", headers: h, body: fd }).then((r) => r.json()); }
 function Icon({ ui, name, size, color }) { const I = ui.icons && ui.icons[name]; return I ? React.createElement(I, { size: size || 18, color: color }) : null; }
 function fmtTime(iso) { try { return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (e) { return ""; } }
 function fmtDay(ymd) { try { const [y, m, d] = String(ymd).split("-").map(Number); return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric", timeZone: "UTC" }); } catch (e) { return ymd; } }
@@ -648,46 +651,102 @@ function BlockStores({ ui, block, notify, onChange }) {
 }
 
 /* ---- Stores ---- */
+/* Pick or drop a spreadsheet. The file is parsed SERVER-side (lib/sheet.js),
+   so .xlsx, .xls and .csv all work and a title block above the headers is
+   found rather than breaking the import. */
+function FileDrop({ ui, file, onFile, hint, busy }) {
+  const ref = useRef(null);
+  const [over, setOver] = useState(false);
+  function take(f) { if (f) onFile(f); }
+  return <div
+    onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+    onDragLeave={() => setOver(false)}
+    onDrop={(e) => { e.preventDefault(); setOver(false); take(e.dataTransfer.files && e.dataTransfer.files[0]); }}
+    onClick={() => !busy && ref.current && ref.current.click()}
+    style={{ border: `2px dashed ${over ? T.navy : T.line}`, background: over ? T.navySoft : "#fff", borderRadius: 12, padding: "22px 16px", textAlign: "center", cursor: busy ? "default" : "pointer" }}>
+    <input ref={ref} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; take(f); }} />
+    <Icon ui={ui} name="Upload" size={24} color={T.navy} />
+    <div style={{ fontFamily: ui.HEAD, fontWeight: 700, fontSize: 14.5, color: T.ink, marginTop: 8 }}>{file ? file.name : "Choose a spreadsheet"}</div>
+    <div style={{ fontSize: 12.5, color: T.sub, marginTop: 3 }}>{file ? "Click to pick a different file" : (hint || "Excel or CSV — drag it here, or click to browse")}</div>
+  </div>;
+}
+
 function StoresPanel({ ui, notify }) {
   const [stores, setStores] = useState(null);
   const [q, setQ] = useState("");
   const [showClosed, setShowClosed] = useState(false);
+  const [file, setFile] = useState(null);
   const [paste, setPaste] = useState("");
+  const [showPaste, setShowPaste] = useState(false);
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
   function reload() { jget(ui, "/api/stores?includeClosed=1&limit=500").then((r) => setStores((r && r.stores) || [])); }
   useEffect(reload, []);
-  function rows() { return paste.split(/\r?\n/).filter((l) => l.trim()).map((l) => l.split("\t")); }
-  // force:true on a PREVIEW only skips the blast-radius refusal so the count
-  // of what Replace WOULD close comes back; apply:false means nothing is written.
-  async function doPreview() { setBusy(true); const r = await jpost(ui, "/api/stores/upload", { rows: rows(), apply: false, closeMissing: true, force: true }); setBusy(false); setPreview(r); }
-  async function doApply(closeMissing, force) {
+  const ready = !!file || !!paste.trim();
+
+  function pasteRows() { return paste.split(/\r?\n/).filter((l) => l.trim()).map((l) => l.split("\t")); }
+  // force:true on a PREVIEW only skips the blast-radius refusal so the count of
+  // what Replace WOULD close comes back; apply:false means nothing is written.
+  async function send(opts) {
     setBusy(true);
-    const r = await jpost(ui, "/api/stores/upload", { rows: rows(), apply: true, closeMissing, force });
+    let r;
+    if (file) {
+      // Flags before the file: multer fills req.body as it streams, and a
+      // field after the file is a classic way to read undefined on the server.
+      const fd = new FormData();
+      if (opts.apply) fd.append("apply", "1");
+      if (opts.closeMissing) fd.append("closeMissing", "1");
+      if (opts.force) fd.append("force", "1");
+      fd.append("file", file);
+      r = await jform(ui, "/api/stores/upload-file", fd);
+    } else {
+      r = await jpost(ui, "/api/stores/upload", { rows: pasteRows(), apply: !!opts.apply, closeMissing: !!opts.closeMissing, force: !!opts.force });
+    }
     setBusy(false);
+    return r;
+  }
+  async function onPick(f) {
+    setFile(f); setPreview(null); setBusy(true);
+    const fd = new FormData();
+    fd.append("closeMissing", "1"); fd.append("force", "1"); fd.append("file", f);
+    const r = await jform(ui, "/api/stores/upload-file", fd);
+    setBusy(false); setPreview(r);
+    if (r && r.error) notify(r.error, "error");
+  }
+  async function doPreview() { const r = await send({ closeMissing: true, force: true }); setPreview(r); if (r && r.error) notify(r.error, "error"); }
+  async function doApply(closeMissing, force) {
+    const r = await send({ apply: true, closeMissing, force });
     if (r && r.error && !r.preview) { notify(r.error, "error"); return; }
     if (r && r.error) { setPreview(r); return; }
-    setPreview(null); setPaste(""); notify(`${r.upserted} stores saved${r.closed ? `, ${r.closed} closed` : ""}`); reload();
+    setPreview(null); setFile(null); setPaste("");
+    notify(`${r.upserted} stores saved${r.closed ? `, ${r.closed} closed` : ""}`);
+    reload();
   }
   const list = (stores || []).filter((s) => (showClosed || s.active) && (!q || String(s.name).toLowerCase().includes(q.toLowerCase()) || String(s.city || "").toLowerCase().includes(q.toLowerCase())));
   return <div>
-    <PanelHead ui={ui} title="Stores" body="The stores a merchandiser can visit. Paste a list straight from a spreadsheet; the first row must be headers (Name, Address, City, State, Zip, Route — Chain and Store # are optional)." />
+    <PanelHead ui={ui} title="Stores" body="The stores a merchandiser can visit. Upload the spreadsheet straight from your export — it needs a header row with Name, and any of Address, City, State, Zip, Route, Chain, Store #. A title block above the headers is fine." />
     <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 420px) 1fr", gap: 18, alignItems: "start" }}>
       <Card>
-        <H2 ui={ui} style={{ marginBottom: 8 }}>Upload</H2>
-        <textarea value={paste} onChange={(e) => { setPaste(e.target.value); setPreview(null); }} rows={9} placeholder={"Name\tAddress\tCity\tState\tZip\tRoute\nKent Kwik #206\t1200 N Grant\tOdessa\tTX\t79761\t21063"} style={Object.assign({}, inputStyle, { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, resize: "vertical" })} />
+        <H2 ui={ui} style={{ marginBottom: 10 }}>Upload</H2>
+        <FileDrop ui={ui} file={file} busy={busy} onFile={onPick} />
+        {busy && <div style={{ fontSize: 12.5, color: T.sub, marginTop: 8 }}>Reading…</div>}
         <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-          <Btn ui={ui} kind="ghost" small onClick={doPreview} disabled={!paste.trim() || busy}>Preview</Btn>
-          <Btn ui={ui} small onClick={() => doApply(false)} disabled={!paste.trim() || busy}>Add / update</Btn>
-          <Btn ui={ui} kind="danger" small onClick={() => doApply(true, false)} disabled={!paste.trim() || busy}>Replace list</Btn>
+          {!file && <Btn ui={ui} kind="ghost" small onClick={doPreview} disabled={!ready || busy}>Preview</Btn>}
+          <Btn ui={ui} small onClick={() => doApply(false)} disabled={!ready || busy}>Add / update</Btn>
+          <Btn ui={ui} kind="danger" small onClick={() => doApply(true, false)} disabled={!ready || busy}>Replace list</Btn>
+          {(file || paste) && <Btn ui={ui} kind="ghost" small onClick={() => { setFile(null); setPaste(""); setPreview(null); }} disabled={busy}>Clear</Btn>}
         </div>
-        <div style={{ fontSize: 11.5, color: T.mute, marginTop: 8, lineHeight: 1.5 }}><b>Add / update</b> never closes a store. <b>Replace list</b> also closes active stores that aren't in the paste (they keep their history).</div>
+        <div style={{ fontSize: 11.5, color: T.mute, marginTop: 8, lineHeight: 1.5 }}><b>Add / update</b> never closes a store. <b>Replace list</b> also closes active stores that aren't in the file (they keep their history).</div>
         {preview && preview.error && <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: T.redSoft, color: T.red, fontSize: 13 }}>
           {preview.error}{preview.preview && <div style={{ marginTop: 8 }}><Btn ui={ui} kind="danger" small onClick={() => doApply(true, true)}>Yes, close {preview.toClose} stores</Btn></div>}
         </div>}
-        {preview && !preview.error && <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: T.navySoft, color: T.ink, fontSize: 13 }}>
-          <b>{preview.parsed}</b> stores read. {preview.willClose ? <span>Replacing would close <b>{preview.willClose}</b> active store{preview.willClose === 1 ? "" : "s"}.</span> : "Nothing would be closed."}
+        {preview && !preview.error && <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: T.navySoft, color: T.ink, fontSize: 13, lineHeight: 1.6 }}>
+          <b>{preview.parsed}</b> stores read{preview.sheet ? <> from sheet <b>{preview.sheet}</b></> : null}.
+          {preview.sheets && preview.sheets.length > 1 && <div style={{ color: T.sub, fontSize: 12 }}>That file has {preview.sheets.length} sheets; only the first is read.</div>}
+          <div>{preview.willClose ? <>Replacing would close <b>{preview.willClose}</b> active store{preview.willClose === 1 ? "" : "s"}.</> : "Nothing would be closed."}</div>
         </div>}
+        <button onClick={() => setShowPaste((v) => !v)} style={{ background: "none", border: "none", color: T.navy, fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: "10px 0 0" }}>{showPaste ? "Hide paste box" : "or paste rows instead"}</button>
+        {showPaste && <textarea value={paste} onChange={(e) => { setPaste(e.target.value); setFile(null); setPreview(null); }} rows={7} placeholder={"Name\tAddress\tCity\tState\tZip\tRoute"} style={Object.assign({}, inputStyle, { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, resize: "vertical", marginTop: 8 })} />}
       </Card>
       <Card>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
@@ -696,7 +755,7 @@ function StoresPanel({ ui, notify }) {
           <label style={{ fontSize: 12.5, color: T.sub, display: "flex", alignItems: "center", gap: 6 }}><input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} /> show closed</label>
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" style={Object.assign({}, inputStyle, { width: 200, padding: "7px 10px", fontSize: 13 })} />
         </div>
-        {stores && !stores.length && <Empty ui={ui} icon="MapPin" title="No stores yet" body="Paste your store list on the left to get started." />}
+        {stores && !stores.length && <Empty ui={ui} icon="MapPin" title="No stores yet" body="Upload your store spreadsheet on the left to get started." />}
         <div style={{ maxHeight: "70vh", overflowY: "auto" }}>
           {list.map((s) => <div key={s.id} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 90px 70px", gap: 10, padding: "8px 4px", borderTop: `1px solid ${T.line}`, fontSize: 13, color: s.active ? T.ink : T.mute, alignItems: "center" }}>
             <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}{s.chain ? <span style={{ color: T.mute, fontWeight: 500 }}> · {s.chain}</span> : null}</div>
@@ -723,6 +782,9 @@ function CatalogPanel({ ui, notify }) {
   const [form, setForm] = useState({ productId: "", aisle: "", bay: "", shelf: "", sectionId: "", note: "" });
   const [copyFrom, setCopyFrom] = useState("");
   const [confirm, setConfirm] = useState(null);
+  const [prodFile, setProdFile] = useState(null);
+  const [prodBusy, setProdBusy] = useState(false);
+  const [showProdPaste, setShowProdPaste] = useState(false);
 
   function loadProducts() { jget(ui, "/api/products?limit=500").then((r) => setProducts((r && r.products) || [])); }
   function loadPlan(id) {
@@ -733,11 +795,21 @@ function CatalogPanel({ ui, notify }) {
   useEffect(() => { loadProducts(); jget(ui, "/api/stores?limit=500").then((r) => setStores((r && r.stores) || [])); }, []);
   useEffect(() => { setPlan(null); setSections([]); loadPlan(storeId); }, [storeId]);
 
+  function savedMsg(r) { return `${r.saved} product${r.saved === 1 ? "" : "s"} saved${r.skipped ? `, ${r.skipped} skipped` : ""}`; }
   async function uploadProducts() {
     const rows = paste.split(/\r?\n/).filter((l) => l.trim()).map((l) => l.split("\t"));
     const r = await jpost(ui, "/api/products", { rows, apply: true });
     if (!r || r.error) return notify((r && r.error) || "Couldn't save", "error");
-    setPaste(""); notify(`${r.saved} product${r.saved === 1 ? "" : "s"} saved${r.skipped ? `, ${r.skipped} skipped` : ""}`); loadProducts();
+    setPaste(""); notify(savedMsg(r)); loadProducts();
+  }
+  async function uploadProductFile(f) {
+    setProdFile(f); setProdBusy(true);
+    const fd = new FormData();
+    fd.append("apply", "1"); fd.append("file", f);
+    const r = await jform(ui, "/api/products/upload-file", fd);
+    setProdBusy(false); setProdFile(null);
+    if (!r || r.error) return notify((r && r.error) || "Couldn't read that file", "error");
+    notify(savedMsg(r) + (r.sheet ? ` from ${r.sheet}` : "")); loadProducts();
   }
   async function addPlanItem() {
     if (!storeId || !form.productId) return notify("Pick a product first", "error");
@@ -757,9 +829,14 @@ function CatalogPanel({ ui, notify }) {
     <PanelHead ui={ui} title="Catalog & store plans" body="Products are the branch's catalog. A store plan is what a merchandiser checks off in that store — each row is a product and where it lives (aisle / bay / shelf). Sections are optional groupings like Cooler or Beer Cave; they're what time gets measured against." />
     <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 400px) 1fr", gap: 18, alignItems: "start" }}>
       <Card>
-        <H2 ui={ui} style={{ marginBottom: 8 }}>Products {products ? <span style={{ color: T.mute, fontWeight: 600 }}>({products.length})</span> : null}</H2>
-        <textarea value={paste} onChange={(e) => setPaste(e.target.value)} rows={4} placeholder={"Paste from a spreadsheet — Name, Item #, Brand, Pack.\nA header row is optional."} style={Object.assign({}, inputStyle, { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, resize: "vertical" })} />
-        <Btn ui={ui} small style={{ marginTop: 8 }} onClick={uploadProducts} disabled={!paste.trim()}>Save products</Btn>
+        <H2 ui={ui} style={{ marginBottom: 10 }}>Products {products ? <span style={{ color: T.mute, fontWeight: 600 }}>({products.length})</span> : null}</H2>
+        <FileDrop ui={ui} file={prodFile} busy={prodBusy} onFile={uploadProductFile} hint="Excel or CSV — Name, Item #, Brand, Pack" />
+        {prodBusy && <div style={{ fontSize: 12.5, color: T.sub, marginTop: 8 }}>Reading…</div>}
+        <button onClick={() => setShowProdPaste((v) => !v)} style={{ background: "none", border: "none", color: T.navy, fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: "10px 0 0" }}>{showProdPaste ? "Hide paste box" : "or paste rows instead"}</button>
+        {showProdPaste && <>
+          <textarea value={paste} onChange={(e) => setPaste(e.target.value)} rows={4} placeholder={"Name\tItem #\tBrand\tPack"} style={Object.assign({}, inputStyle, { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, resize: "vertical", marginTop: 8 })} />
+          <Btn ui={ui} small style={{ marginTop: 8 }} onClick={uploadProducts} disabled={!paste.trim()}>Save products</Btn>
+        </>}
         <input value={pq} onChange={(e) => setPq(e.target.value)} placeholder="Search products…" style={Object.assign({}, inputStyle, { marginTop: 14, padding: "7px 10px", fontSize: 13 })} />
         <div style={{ maxHeight: 420, overflowY: "auto", marginTop: 6 }}>
           {products && !products.length && <Empty ui={ui} icon="ClipboardList" title="No products yet" body="Paste the catalog above." />}

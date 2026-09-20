@@ -2,7 +2,7 @@
    boundary, and the mount for the screens in proof-ui.jsx. One bundle. */
 import React, { useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import { ClipboardList, ShieldCheck, Check, X, ChevronRight, ChevronLeft, MapPin, Clock, Camera, AlertTriangle, Search, Users, Plus, Trash2, CalendarDays } from "lucide-react";
+import { ClipboardList, ShieldCheck, Check, X, ChevronRight, ChevronLeft, MapPin, Clock, Camera, AlertTriangle, Search, Users, Plus, Trash2, CalendarDays, Upload } from "lucide-react";
 import { App as ProofScreens } from "./proof-ui.jsx";
 
 const HEAD = "'Archivo', Inter, system-ui, sans-serif";
@@ -31,7 +31,7 @@ function deviceId() {
 }
 
 const UI = { HEAD, BODY, H, brand: BRAND, C: { line: BRAND.line, ink: BRAND.ink, sub: BRAND.sub, mute: BRAND.mute, redDeep: BRAND.red },
-  icons: { ClipboardList, ShieldCheck, Check, X, ChevronRight, ChevronLeft, MapPin, Clock, Camera, AlertTriangle, Search, Users, Plus, Trash2, CalendarDays } };
+  icons: { ClipboardList, ShieldCheck, Check, X, ChevronRight, ChevronLeft, MapPin, Clock, Camera, AlertTriangle, Search, Users, Plus, Trash2, CalendarDays, Upload } };
 
 function Mark({ size }) {
   const s = size || 40;
