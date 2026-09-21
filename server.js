@@ -67,7 +67,7 @@ const wrap = (fn) => async (req, res) => {
   try { const out = await fn(req); if (out && out.error) return res.status(out.pending ? 200 : 400).json(out); res.json(out); }
   catch (e) { console.error("[proof]", req.method, req.path, e && e.message); res.status(503).json({ error: "unavailable" }); }
 };
-const MARKER = "proof-0.2.2";
+const MARKER = "proof-0.2.3";
 
 app.get("/api/health", (req, res) => res.json({ ok: true, ready, marker: MARKER, node: process.version, at: new Date().toISOString() }));
 app.get("/api/migrations", requireRole("proofadmin"), wrap(() => DB.listMigrations()));

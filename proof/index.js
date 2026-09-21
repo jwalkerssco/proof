@@ -456,7 +456,12 @@ function create(deps) {
 
   // Adding the same store to the same block twice creates a "2nd pull" --
   // pull is COALESCE(max(pull),0)+1 per (block_id, store_id).
-  async function blockStoreAdd(branch, blockId, storeId, flags) {
+  // NB: no `branch` parameter. It used to take one, unused, and the route
+  // called it without -- so every argument shifted one slot and the store id
+  // arrived where the block id belonged. Postgres rejected it for a bigint
+  // column and the add 503'd. proof/test-blocks.js calls these exactly the
+  // way server.js does, which is the only way that class of bug gets caught.
+  async function blockStoreAdd(blockId, storeId, flags) {
     const r = await pool().query("SELECT COALESCE(MAX(pull),0)+1 AS n FROM proof_block_stores WHERE block_id=$1 AND store_id=$2", [blockId, storeId]);
     const sortR = await pool().query("SELECT COALESCE(MAX(seq),0)+1 AS n FROM proof_block_stores WHERE block_id=$1", [blockId]);
     await pool().query("INSERT INTO proof_block_stores (block_id, store_id, pull, seq, flags) VALUES ($1,$2,$3,$4,$5)", [blockId, storeId, r.rows[0].n, sortR.rows[0].n, flags || null]);
