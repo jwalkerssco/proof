@@ -295,7 +295,15 @@ function create(deps) {
     const args = [branch], where = ["branch_id = $1"];
     if (!o.includeClosed) where.push("active");
     if (o.route) { args.push(o.route); where.push("route = $" + args.length); }
-    if (o.q) { args.push("%" + o.q.toLowerCase() + "%"); where.push("lower(name) LIKE $" + args.length); }
+    // Search NAME, CITY, CHAIN, ADDRESS and ROUTE together. Name-only search
+    // reads as "the search is broken" the moment someone types a town or a
+    // route number to find the stores for a block -- which is the natural
+    // thing to type when store names look like "Allsup's #102266".
+    if (o.q) {
+      args.push("%" + String(o.q).toLowerCase().trim() + "%");
+      const p = "$" + args.length;
+      where.push(`(lower(name) LIKE ${p} OR lower(coalesce(city,'')) LIKE ${p} OR lower(coalesce(chain,'')) LIKE ${p} OR lower(coalesce(addr,'')) LIKE ${p} OR lower(coalesce(route,'')) LIKE ${p})`);
+    }
     const limit = Math.min(500, parseInt(o.limit, 10) || 200);
     const r = await pool().query(`SELECT * FROM proof_stores WHERE ${where.join(" AND ")} ORDER BY lower(name) LIMIT ${limit}`, args);
     return { stores: r.rows };

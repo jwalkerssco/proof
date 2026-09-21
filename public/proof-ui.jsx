@@ -590,23 +590,29 @@ function ScheduleBoard({ ui, notify }) {
 
   return <div>
     <PanelHead ui={ui} title="Weekly schedule" body="The same route every week — only who works it changes. Drag a team or a single person onto a block; drop onto an empty part of a day to make a new block. Truck days default to a 4:30 AM start." />
-    <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 18, alignItems: "start" }}>
-      <div style={{ position: "sticky", top: 0 }}>
-        <Card>
-          <Eyebrow ui={ui}>Teams</Eyebrow>
+    {/* Palette ACROSS THE TOP, not down the side: seven day columns plus a
+        220px rail overflowed the window and left the week scrolled off the
+        left edge. Full width belongs to the board. */}
+    <Card style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div style={{ minWidth: 200 }}>
+          <Eyebrow ui={ui} style={{ marginBottom: 6 }}>Teams</Eyebrow>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {teams.map((t) => <Chip key={t.id} label={t.name} color={TEAM_HEX[t.color] || TEAM_HEX.slate} draggable onDragStart={() => { drag.current = { kind: "team", id: t.id }; }} />)}
             {!teams.length && <div style={{ fontSize: 12.5, color: T.mute }}>No teams yet — add them on the Team tab.</div>}
           </div>
-          <Eyebrow ui={ui} style={{ marginTop: 16 }}>People</Eyebrow>
-          <div style={{ fontSize: 12, color: T.sub, marginBottom: 8, lineHeight: 1.45 }}>Drop a person on a block to put them on it in addition to their team — a one-off cover, without changing anyone's team.</div>
+        </div>
+        <div style={{ flex: 1, minWidth: 260 }}>
+          <Eyebrow ui={ui} style={{ marginBottom: 6 }}>People <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 500, color: T.sub }}>— drop one on a block for a one-off cover, without changing their team</span></Eyebrow>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {merchPeople.map((p) => <Chip key={p.id} label={p.name} outline draggable onDragStart={() => { drag.current = { kind: "person", id: p.id }; }} />)}
             {!merchPeople.length && <div style={{ fontSize: 12.5, color: T.mute }}>No merchandisers yet.</div>}
           </div>
-        </Card>
+        </div>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(170px, 1fr))", gap: 10 }}>
+    </Card>
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(150px, 1fr))", gap: 10 }}>
         {WEEK_ORDER.map((wd) => (
           <div key={wd} onDragOver={(e) => { e.preventDefault(); setHover("day" + wd); }} onDragLeave={() => setHover((h) => h === "day" + wd ? null : h)} onDrop={(e) => { e.preventDefault(); if (hover === "day" + wd) dropOnDay(wd); }}
             style={{ minHeight: 320, borderRadius: 12, padding: 6, background: hover === "day" + wd ? T.navySoft : "transparent", transition: "background .15s" }}>
@@ -643,9 +649,29 @@ function ScheduleBoard({ ui, notify }) {
   </div>;
 }
 function BlockStores({ ui, block, notify, onChange }) {
-  const [q, setQ] = useState(""); const [results, setResults] = useState([]); const [open, setOpen] = useState(false);
-  async function search(v) { setQ(v); if (!v) return setResults([]); const r = await jget(ui, "/api/stores?q=" + encodeURIComponent(v) + "&limit=8"); setResults((r && r.stores) || []); }
-  async function add(s) { const r = await jpost(ui, "/api/blocks/" + block.id + "/stores", { storeId: s.id }); setQ(""); setResults([]); setOpen(false); notify(r && r.pull > 1 ? `${s.name} added as pull #${r.pull}` : `${s.name} added`); onChange(); }
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState(null); // null = not loaded yet
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // Opening the picker LISTS the stores -- searching only after you guess a
+  // matching name is how "I can't add stores" happens. Typing then filters,
+  // and the server matches name, city, chain, address or route.
+  async function load(v) {
+    setBusy(true);
+    const r = await jget(ui, "/api/stores?limit=25" + (v ? "&q=" + encodeURIComponent(v) : ""));
+    setBusy(false);
+    if (r && r.error) { notify(r.error, "error"); setResults([]); return; }
+    setResults((r && r.stores) || []);
+  }
+  function openPicker() { setOpen(true); setQ(""); load(""); }
+  function search(v) { setQ(v); load(v); }
+  async function add(s) {
+    const r = await jpost(ui, "/api/blocks/" + block.id + "/stores", { storeId: s.id });
+    if (!r || r.error) { notify((r && r.error) || "Couldn't add that store", "error"); return; }
+    setQ(""); setResults(null); setOpen(false);
+    notify(r.pull > 1 ? `${s.name} added as pull #${r.pull}` : `${s.name} added`);
+    onChange();
+  }
   return <div style={{ borderTop: `1px solid ${T.line}`, paddingTop: 6 }}>
     {(block.stores || []).map((s, i) => (
       <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "3px 0" }}>
@@ -656,13 +682,24 @@ function BlockStores({ ui, block, notify, onChange }) {
         <button onClick={() => jpost(ui, "/api/blocks/" + block.id + "/stores", { remove: true, storeId: s.storeId, rowId: s.id }).then(() => { notify("Store removed"); onChange(); })} aria-label="Remove store" style={{ background: "none", border: "none", cursor: "pointer", padding: 0, lineHeight: 0 }}><Icon ui={ui} name="X" size={12} color={T.mute} /></button>
       </div>
     ))}
-    {open ? <div style={{ position: "relative", marginTop: 4 }}>
-      <input autoFocus value={q} onChange={(e) => search(e.target.value)} onBlur={() => setTimeout(() => { if (!q) setOpen(false); }, 150)} placeholder="Type a store name…" style={Object.assign({}, inputStyle, { padding: "6px 8px", fontSize: 12 })} />
-      {results.length > 0 && <div style={{ position: "absolute", left: 0, right: 0, top: "100%", background: "#fff", border: `1px solid ${T.line}`, borderRadius: 8, boxShadow: "0 8px 20px rgba(16,31,60,0.12)", zIndex: 10, maxHeight: 200, overflowY: "auto" }}>
-        {results.map((s) => <div key={s.id} onMouseDown={() => add(s)} style={{ padding: "7px 10px", fontSize: 12.5, cursor: "pointer", color: T.ink, borderTop: `1px solid ${T.line}` }}>{s.name}<span style={{ color: T.mute }}> · {s.city || s.route || ""}</span></div>)}
-      </div>}
-      {q && !results.length && <div style={{ fontSize: 11.5, color: T.mute, padding: "4px 2px" }}>No store matches.</div>}
-    </div> : <button onClick={() => setOpen(true)} style={{ marginTop: 4, background: "none", border: "none", color: T.navy, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "3px 0" }}>+ Add store</button>}
+    {open ? <div style={{ marginTop: 4 }}>
+      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+        <input autoFocus value={q} onChange={(e) => search(e.target.value)} placeholder="Filter by name, city, chain or route…" style={Object.assign({}, inputStyle, { padding: "6px 8px", fontSize: 12 })} />
+        <button onClick={() => { setOpen(false); setQ(""); setResults(null); }} aria-label="Close" style={{ background: "none", border: "none", cursor: "pointer", padding: 2, lineHeight: 0 }}><Icon ui={ui} name="X" size={13} color={T.mute} /></button>
+      </div>
+      <div style={{ border: `1px solid ${T.line}`, borderRadius: 8, marginTop: 4, maxHeight: 190, overflowY: "auto", background: "#fff" }}>
+        {busy && results === null && <div style={{ fontSize: 11.5, color: T.mute, padding: "8px 10px" }}>Loading stores…</div>}
+        {results && results.map((s) => (
+          <div key={s.id} onClick={() => add(s)} style={{ padding: "7px 10px", fontSize: 12.5, cursor: "pointer", color: T.ink, borderBottom: `1px solid ${T.line}` }}>
+            <div style={{ fontWeight: 600 }}>{s.name}</div>
+            <div style={{ color: T.mute, fontSize: 11 }}>{[s.city, s.chain, s.route].filter(Boolean).join(" · ")}</div>
+          </div>
+        ))}
+        {results && !results.length && <div style={{ fontSize: 11.5, color: T.mute, padding: "8px 10px", lineHeight: 1.5 }}>
+          {q ? <>Nothing matches “{q}”.</> : <>No stores yet — upload your list on the <b>Stores</b> tab.</>}
+        </div>}
+      </div>
+    </div> : <button onClick={openPicker} style={{ marginTop: 4, background: "none", border: "none", color: T.navy, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "3px 0" }}>+ Add store</button>}
   </div>;
 }
 
