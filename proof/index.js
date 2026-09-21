@@ -632,7 +632,18 @@ function create(deps) {
       keep.push([branch, deriveProductId({ name, itemNo: itemNo || null }), itemNo || null, name, brand, pack, cat, true]);
       saved++;
     }
-    if (o.apply === false) return { ok: true, saved, skipped, headerSeen: hasHeader };
+    // What a REPLACE would retire: everything active that this file does not
+    // mention. Computed for the preview too, so "I'm about to wipe 300
+    // products" is visible BEFORE the click rather than after it.
+    const incoming = new Set(keep.map((k) => k[1]));
+    const cur = await pool().query("SELECT id FROM proof_products WHERE branch_id=$1 AND active", [branch]);
+    const missing = cur.rows.map((x) => x.id).filter((id) => !incoming.has(id));
+
+    if (!o.apply) {
+      return { ok: true, preview: true, parsed: saved, skipped, categorised, headerSeen: hasHeader,
+               existing: cur.rows.length, willClose: o.replace ? missing.length : 0,
+               sample: keep.slice(0, 5).map((k) => ({ name: k[3], itemNo: k[2], brand: k[4] })) };
+    }
     // Batched for the same reason as the store upload -- a catalog is
     // thousands of rows and row-at-a-time times the request out.
     const up = await D.batchUpsert(pool(), {
@@ -641,7 +652,27 @@ function create(deps) {
       conflict: ["branch_id", "id"],
       rows: keep,
     });
-    return { ok: true, saved: up.written, skipped, duplicates: up.collapsed, categorised, headerSeen: hasHeader };
+    let closed = 0;
+    if (o.replace && missing.length) {
+      // Soft-retire, never DELETE: plan items and past visit results point at
+      // these rows, and a hard delete would take a merchandiser's history
+      // with it. Their plan rows go inactive alongside, or a store plan keeps
+      // listing a product nobody carries.
+      const a = await pool().query("UPDATE proof_products SET active=false WHERE branch_id=$1 AND id = ANY($2)", [branch, missing]);
+      await pool().query("UPDATE proof_plan_items SET active=false WHERE branch_id=$1 AND product_id = ANY($2)", [branch, missing]);
+      closed = a.rowCount || 0;
+    }
+    return { ok: true, saved: up.written, skipped, duplicates: up.collapsed, categorised, closed, headerSeen: hasHeader };
+  }
+
+  /* Wipe the catalog. Soft, for the same reason as above -- and it takes the
+     store plans with it, which is stated plainly on the button rather than
+     discovered afterwards. Returns the counts so the confirmation can say
+     exactly what it did. */
+  async function productsClear(branch) {
+    const a = await pool().query("UPDATE proof_products SET active=false WHERE branch_id=$1 AND active", [branch]);
+    const b = await pool().query("UPDATE proof_plan_items SET active=false WHERE branch_id=$1 AND active", [branch]);
+    return { ok: true, products: a.rowCount || 0, planItems: b.rowCount || 0 };
   }
 
   async function sections(branch, storeId) {
@@ -1076,7 +1107,7 @@ function create(deps) {
     stores, uploadStores, storeDetail,
     teams, teamSave, teamRemove, week, blockAdd, blockUpdate, blockRemove,
     blockStoreAdd, blockStoreRemove, blockStoreFlags, blockMemberAdd, blockMemberRemove, myDay,
-    products, productSave, productRemove, productsUpload, productsSetCategory,
+    products, productSave, productRemove, productsUpload, productsSetCategory, productsClear,
     sections, sectionSave, sectionRemove, planItems, planItemSet, planItemRemove, planItemsCopy,
     openVisitFor, startVisit, sectionEnter, sectionExit, itemResult, addPhoto, closeForgotten, endVisit,
     blockedOpenVisit, nightlySweepOpenVisits, visitDetail, photo, myVisits, liveCompletion, reporting,

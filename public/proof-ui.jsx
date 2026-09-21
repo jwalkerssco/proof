@@ -867,6 +867,8 @@ function CatalogPanel({ ui, notify }) {
   const [showProdPaste, setShowProdPaste] = useState(false);
   const [catFilter, setCatFilter] = useState("");
   const [picked, setPicked] = useState(new Set());
+  const [prodPreview, setProdPreview] = useState(null);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   function loadProducts() { jget(ui, "/api/products?limit=500").then((r) => setProducts((r && r.products) || [])); }
   function loadPlan(id) {
@@ -877,21 +879,49 @@ function CatalogPanel({ ui, notify }) {
   useEffect(() => { loadProducts(); jget(ui, "/api/stores?limit=500").then((r) => setStores((r && r.stores) || [])); }, []);
   useEffect(() => { setPlan(null); setSections([]); loadPlan(storeId); }, [storeId]);
 
-  function savedMsg(r) { return `${r.saved} product${r.saved === 1 ? "" : "s"} saved${r.skipped ? `, ${r.skipped} skipped` : ""}`; }
-  async function uploadProducts() {
-    const rows = paste.split(/\r?\n/).filter((l) => l.trim()).map((l) => l.split("\t"));
-    const r = await jpost(ui, "/api/products", { rows, apply: true });
-    if (!r || r.error) return notify((r && r.error) || "Couldn't save", "error");
-    setPaste(""); notify(savedMsg(r)); loadProducts();
+  function savedMsg(r) {
+    return `${r.saved} product${r.saved === 1 ? "" : "s"} saved` +
+      (r.closed ? `, ${r.closed} retired` : "") + (r.skipped ? `, ${r.skipped} skipped` : "");
   }
-  async function uploadProductFile(f) {
-    setProdFile(f); setProdBusy(true);
+  function pasteRows() { return paste.split(/\r?\n/).filter((l) => l.trim()).map((l) => l.split("\t")); }
+  /* Picking a file PREVIEWS it -- nothing is written until Add or Replace is
+     pressed. A wrong file (a store list pasted into the catalog, say) should
+     be caught on screen, not discovered afterwards in the product list. */
+  async function sendProducts(opts) {
+    setProdBusy(true);
+    let r;
+    if (prodFile) {
+      const fd = new FormData();
+      if (opts.apply) fd.append("apply", "1");
+      if (opts.replace) fd.append("replace", "1");
+      fd.append("file", prodFile);
+      r = await jform(ui, "/api/products/upload-file", fd);
+    } else {
+      r = await jpost(ui, "/api/products", { rows: pasteRows(), apply: !!opts.apply, replace: !!opts.replace });
+    }
+    setProdBusy(false);
+    return r;
+  }
+  async function pickProductFile(f) {
+    setProdFile(f); setProdPreview(null); setProdBusy(true);
     const fd = new FormData();
-    fd.append("apply", "1"); fd.append("file", f);
+    fd.append("replace", "1"); fd.append("file", f); // preview only: apply is absent, so nothing is written
     const r = await jform(ui, "/api/products/upload-file", fd);
-    setProdBusy(false); setProdFile(null);
-    if (!r || r.error) return notify((r && r.error) || "Couldn't read that file", "error");
-    notify(savedMsg(r) + (r.sheet ? ` from ${r.sheet}` : "")); loadProducts();
+    setProdBusy(false);
+    if (r && r.error) { notify(r.error, "error"); return; }
+    setProdPreview(r);
+  }
+  async function applyProducts(replace) {
+    const r = await sendProducts({ apply: true, replace });
+    if (!r || r.error) return notify((r && r.error) || "Couldn't save", "error");
+    setPaste(""); setProdFile(null); setProdPreview(null);
+    notify(savedMsg(r) + (r.sheet ? ` from ${r.sheet}` : "")); loadProducts(); loadPlan(storeId);
+  }
+  async function clearProducts() {
+    const r = await jpost(ui, "/api/products/clear", {});
+    if (!r || r.error) return notify((r && r.error) || "Couldn't clear", "error");
+    notify(`Cleared ${r.products} product${r.products === 1 ? "" : "s"}${r.planItems ? ` and ${r.planItems} plan row${r.planItems === 1 ? "" : "s"}` : ""}`);
+    setPicked(new Set()); loadProducts(); loadPlan(storeId);
   }
   async function addPlanItem() {
     if (!storeId || !form.productId) return notify("Pick a product first", "error");
@@ -926,13 +956,22 @@ function CatalogPanel({ ui, notify }) {
     <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 400px) 1fr", gap: 18, alignItems: "start" }}>
       <Card>
         <H2 ui={ui} style={{ marginBottom: 10 }}>Products {products ? <span style={{ color: T.mute, fontWeight: 600 }}>({products.length})</span> : null}</H2>
-        <FileDrop ui={ui} file={prodFile} busy={prodBusy} onFile={uploadProductFile} hint="Excel or CSV — Name, Item #, Brand, Pack" />
+        <FileDrop ui={ui} file={prodFile} busy={prodBusy} onFile={pickProductFile} hint="Excel or CSV — Name, Item #, Brand, Pack, Category" />
         {prodBusy && <div style={{ fontSize: 12.5, color: T.sub, marginTop: 8 }}>Reading…</div>}
+        {prodPreview && <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: T.navySoft, color: T.ink, fontSize: 13, lineHeight: 1.6 }}>
+          <b>{prodPreview.parsed}</b> product{prodPreview.parsed === 1 ? "" : "s"} read{prodPreview.sheet ? <> from sheet <b>{prodPreview.sheet}</b></> : null}{prodPreview.skipped ? <>, {prodPreview.skipped} row{prodPreview.skipped === 1 ? "" : "s"} without a name skipped</> : null}.
+          {prodPreview.categorised > 0 && <div>{prodPreview.categorised} carry a category.</div>}
+          {prodPreview.sample && prodPreview.sample.length > 0 && <div style={{ color: T.sub, fontSize: 12, marginTop: 4 }}>First rows: {prodPreview.sample.map((s) => s.name).join(", ")}</div>}
+          {prodPreview.willClose > 0 && <div style={{ marginTop: 4 }}>Replacing would retire <b>{prodPreview.willClose}</b> product{prodPreview.willClose === 1 ? "" : "s"} not in this file.</div>}
+        </div>}
+        {(prodFile || paste.trim()) && <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <Btn ui={ui} small onClick={() => applyProducts(false)} disabled={prodBusy}>Add / update</Btn>
+          <Btn ui={ui} small kind="danger" onClick={() => applyProducts(true)} disabled={prodBusy}>Replace catalog</Btn>
+          <Btn ui={ui} small kind="ghost" onClick={() => { setProdFile(null); setPaste(""); setProdPreview(null); }} disabled={prodBusy}>Clear</Btn>
+        </div>}
+        <div style={{ fontSize: 11.5, color: T.mute, marginTop: 8, lineHeight: 1.5 }}><b>Add / update</b> only adds and edits. <b>Replace catalog</b> also retires products that aren't in the file, and takes their store-plan rows with them.</div>
         <button onClick={() => setShowProdPaste((v) => !v)} style={{ background: "none", border: "none", color: T.navy, fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: "10px 0 0" }}>{showProdPaste ? "Hide paste box" : "or paste rows instead"}</button>
-        {showProdPaste && <>
-          <textarea value={paste} onChange={(e) => setPaste(e.target.value)} rows={4} placeholder={"Name\tItem #\tBrand\tPack"} style={Object.assign({}, inputStyle, { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, resize: "vertical", marginTop: 8 })} />
-          <Btn ui={ui} small style={{ marginTop: 8 }} onClick={uploadProducts} disabled={!paste.trim()}>Save products</Btn>
-        </>}
+        {showProdPaste && <textarea value={paste} onChange={(e) => { setPaste(e.target.value); setProdFile(null); setProdPreview(null); }} rows={4} placeholder={"Name\tItem #\tBrand\tPack"} style={Object.assign({}, inputStyle, { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, resize: "vertical", marginTop: 8 })} />}
         <input value={pq} onChange={(e) => setPq(e.target.value)} placeholder="Search name or brand…" style={Object.assign({}, inputStyle, { marginTop: 14, padding: "7px 10px", fontSize: 13 })} />
         {/* Categorising the catalog is what makes beer-vs-NA measurable, and
             no export arrives with our own split -- so it is a multi-select
@@ -951,6 +990,10 @@ function CatalogPanel({ ui, notify }) {
         <div style={{ maxHeight: 420, overflowY: "auto", marginTop: 6 }}>
           {products && !products.length && <Empty ui={ui} icon="ClipboardList" title="No products yet" body="Upload the catalog above." />}
           {products && products.length > 0 && !visible.length && <div style={{ fontSize: 12.5, color: T.mute, padding: "10px 2px" }}>Nothing here.</div>}
+          {visible.length > 0 && <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 2px", fontSize: 11.5, color: T.mute }}>
+            <input type="checkbox" checked={picked.size > 0 && visible.every((p) => picked.has(p.id))} onChange={(e) => setPicked(e.target.checked ? new Set(visible.map((p) => p.id)) : new Set())} />
+            <span>select all {visible.length} shown</span>
+          </div>}
           {visible.map((p) => <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 2px", borderTop: `1px solid ${T.line}`, fontSize: 13 }}>
             <input type="checkbox" checked={picked.has(p.id)} onChange={() => togglePick(p.id)} />
             <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontWeight: 600, color: T.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div><div style={{ fontSize: 11.5, color: T.mute }}>{[p.itemNo && "#" + p.itemNo, p.brand, p.pack].filter(Boolean).join(" · ")}</div></div>
@@ -958,6 +1001,9 @@ function CatalogPanel({ ui, notify }) {
             <button onClick={() => setConfirm({ title: `Remove ${p.name}?`, body: "It comes off every store plan too.", run: () => jpost(ui, "/api/products/" + encodeURIComponent(p.id) + "/remove", {}).then(() => { notify("Product removed"); loadProducts(); loadPlan(storeId); }) })} aria-label="Remove" style={{ background: "none", border: "none", cursor: "pointer", padding: 4, lineHeight: 0 }}><Icon ui={ui} name="Trash2" size={14} color={T.mute} /></button>
           </div>)}
         </div>
+        {products && products.length > 0 && <div style={{ borderTop: `1px solid ${T.line}`, marginTop: 10, paddingTop: 10 }}>
+          <button onClick={() => setConfirmClear(true)} style={{ background: "none", border: "none", color: T.red, fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: 0 }}>Clear the whole catalog</button>
+        </div>}
       </Card>
       <Card>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
@@ -1002,6 +1048,10 @@ function CatalogPanel({ ui, notify }) {
       </Card>
     </div>
     {confirm && <Sheet ui={ui} title={confirm.title} body={confirm.body} confirmLabel="Remove" confirmKind="danger" onCancel={() => setConfirm(null)} onConfirm={() => { confirm.run(); setConfirm(null); }} />}
+    {confirmClear && <Sheet ui={ui} title={`Clear all ${(products || []).length} products?`}
+      body="Every product is retired and every store plan row goes with it. Visits already recorded keep their history. You'd upload a fresh catalog afterwards."
+      confirmLabel="Clear the catalog" confirmKind="danger"
+      onCancel={() => setConfirmClear(false)} onConfirm={() => { clearProducts(); setConfirmClear(false); }} />}
   </div>;
 }
 

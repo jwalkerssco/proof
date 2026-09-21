@@ -68,7 +68,7 @@ const wrap = (fn) => async (req, res) => {
   try { const out = await fn(req); if (out && out.error) return res.status(out.pending ? 200 : 400).json(out); res.json(out); }
   catch (e) { console.error("[proof]", req.method, req.path, e && e.message); res.status(503).json({ error: "unavailable" }); }
 };
-const MARKER = "proof-0.4.0";
+const MARKER = "proof-0.4.1";
 
 app.get("/api/health", (req, res) => res.json({ ok: true, ready, marker: MARKER, node: process.version, at: new Date().toISOString() }));
 app.get("/api/migrations", requireRole("proofadmin"), wrap(() => DB.listMigrations()));
@@ -141,14 +141,16 @@ app.post("/api/blocks/:id/members", requireRole("proofadmin"), wrap((req) => {
 /* ---- catalog ---- */
 app.get("/api/products", requireRole("proof", "proofadmin"), wrap((req) => PROOF.products(req.session.branch, { q: req.query.q, limit: req.query.limit, category: req.query.category })));
 app.post("/api/products/category", requireRole("proofadmin"), wrap((req) => { const b = req.body || {}; return PROOF.productsSetCategory(req.session.branch, b.ids, b.category); }));
-app.post("/api/products", requireRole("proofadmin"), wrap((req) => { const b = req.body || {}; return b.rows ? PROOF.productsUpload(req.session.branch, b.rows, { apply: !!b.apply }) : PROOF.productSave(req.session.branch, b); }));
+app.post("/api/products", requireRole("proofadmin"), wrap((req) => { const b = req.body || {}; return b.rows ? PROOF.productsUpload(req.session.branch, b.rows, { apply: !!b.apply, replace: !!b.replace }) : PROOF.productSave(req.session.branch, b); }));
+app.post("/api/products/clear", requireRole("proofadmin"), wrap((req) => PROOF.productsClear(req.session.branch)));
 app.post("/api/products/:id/remove", requireRole("proofadmin"), wrap((req) => PROOF.productRemove(req.session.branch, req.params.id)));
 app.post("/api/products/upload-file", requireRole("proofadmin"), upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file was attached." });
     const parsed = SHEET.parseWorkbook(req.file.buffer);
     if (parsed.error) return res.status(400).json(parsed);
-    const out = await PROOF.productsUpload(req.session.branch, parsed.rows, { apply: (req.body || {}).apply === "1" });
+    const b = req.body || {};
+    const out = await PROOF.productsUpload(req.session.branch, parsed.rows, { apply: b.apply === "1", replace: b.replace === "1" });
     res.status(out && out.error ? 400 : 200).json(Object.assign({ file: req.file.originalname, sheet: parsed.sheet, sheets: parsed.sheets }, out));
   } catch (e) { console.error("[proof] products/upload-file", e && e.message); res.status(503).json({ error: "Couldn't read that file." }); }
 });
