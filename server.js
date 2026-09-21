@@ -68,7 +68,7 @@ const wrap = (fn) => async (req, res) => {
   try { const out = await fn(req); if (out && out.error) return res.status(out.pending ? 200 : 400).json(out); res.json(out); }
   catch (e) { console.error("[proof]", req.method, req.path, e && e.message); res.status(503).json({ error: "unavailable" }); }
 };
-const MARKER = "proof-0.4.1";
+const MARKER = "proof-0.5.0";
 
 app.get("/api/health", (req, res) => res.json({ ok: true, ready, marker: MARKER, node: process.version, at: new Date().toISOString() }));
 app.get("/api/migrations", requireRole("proofadmin"), wrap(() => DB.listMigrations()));
@@ -113,6 +113,7 @@ app.post("/api/stores/:id/sections", requireRole("proofadmin"), wrap((req) => PR
 app.get("/api/stores/:id/plan", requireRole("proof", "proofadmin"), wrap((req) => PROOF.planItems(req.session.branch, req.params.id, req.query.category)));
 app.post("/api/stores/:id/plan", requireRole("proofadmin"), wrap((req) => {
   const b = req.body || {};
+  if (b.productIds) return PROOF.planItemsAddMany(req.session.branch, req.params.id, b.productIds, b);
   if (b.copyFrom) return PROOF.planItemsCopy(req.session.branch, b.copyFrom, req.params.id);
   if (b.remove) return PROOF.planItemRemove(req.session.branch, b.id);
   return PROOF.planItemSet(req.session.branch, { ...b, storeId: req.params.id });

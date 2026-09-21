@@ -740,6 +740,41 @@ function create(deps) {
     return { ok: true };
   }
 
+  /* Put many products on a store's plan at once, all at the same location.
+     A beer aisle is eighty SKUs in one place -- adding them through a
+     one-product dropdown is not a workflow, it is a punishment.
+
+     Rows already on the plan at that exact location are skipped rather than
+     duplicated (ON CONFLICT DO NOTHING against the expression index), and a
+     row that was retired earlier is revived instead of being left inactive
+     while a new one appears beside it. */
+  async function planItemsAddMany(branch, storeId, productIds, o) {
+    o = o || {};
+    if (!storeId) return { error: "Pick a store first" };
+    if (!Array.isArray(productIds) || !productIds.length) return { error: "Nothing selected" };
+    const loc = { aisle: o.aisle || null, bay: o.bay || null, shelf: o.shelf || null };
+
+    // Revive matching retired rows first, so re-adding never leaves a ghost.
+    const rev = await pool().query(
+      "UPDATE proof_plan_items SET active=true, section_id=$5, note=$6, updated_at=now() " +
+      "WHERE branch_id=$1 AND store_id=$2 AND product_id = ANY($3) AND NOT active " +
+      "  AND COALESCE(aisle,'')=COALESCE($4::text,'') RETURNING product_id",
+      [branch, storeId, productIds, loc.aisle, o.sectionId || null, o.note || null]);
+    const revived = new Set(rev.rows.map((x) => x.product_id));
+
+    const seqR = await pool().query("SELECT COALESCE(MAX(seq),0) AS n FROM proof_plan_items WHERE branch_id=$1 AND store_id=$2", [branch, storeId]);
+    let seq = Number(seqR.rows[0].n);
+    const rows = productIds.filter((id) => !revived.has(id)).map((id) => [branch, storeId, o.sectionId || null, id, loc.aisle, loc.bay, loc.shelf, o.note || null, ++seq, true]);
+    const up = rows.length ? await D.batchUpsert(pool(), {
+      table: "proof_plan_items",
+      columns: ["branch_id", "store_id", "section_id", "product_id", "aisle", "bay", "shelf", "note", "seq", "active"],
+      doNothing: true,
+      rows,
+    }) : { written: 0 };
+    const added = up.written + revived.size;
+    return { ok: true, added, skipped: productIds.length - added, revived: revived.size };
+  }
+
   // Most stores in a chain are laid out close enough that starting from a
   // sibling beats starting from nothing.
   async function planItemsCopy(branch, fromStore, toStore) {
@@ -1108,7 +1143,7 @@ function create(deps) {
     teams, teamSave, teamRemove, week, blockAdd, blockUpdate, blockRemove,
     blockStoreAdd, blockStoreRemove, blockStoreFlags, blockMemberAdd, blockMemberRemove, myDay,
     products, productSave, productRemove, productsUpload, productsSetCategory, productsClear,
-    sections, sectionSave, sectionRemove, planItems, planItemSet, planItemRemove, planItemsCopy,
+    sections, sectionSave, sectionRemove, planItems, planItemSet, planItemRemove, planItemsCopy, planItemsAddMany,
     openVisitFor, startVisit, sectionEnter, sectionExit, itemResult, addPhoto, closeForgotten, endVisit,
     blockedOpenVisit, nightlySweepOpenVisits, visitDetail, photo, myVisits, liveCompletion, reporting,
     reportCategories, reportBrands,

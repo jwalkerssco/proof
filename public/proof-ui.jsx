@@ -869,6 +869,7 @@ function CatalogPanel({ ui, notify }) {
   const [picked, setPicked] = useState(new Set());
   const [prodPreview, setProdPreview] = useState(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [bulk, setBulk] = useState({ aisle: "", bay: "", shelf: "", sectionId: "", note: "" });
 
   function loadProducts() { jget(ui, "/api/products?limit=500").then((r) => setProducts((r && r.products) || [])); }
   function loadPlan(id) {
@@ -942,6 +943,13 @@ function CatalogPanel({ ui, notify }) {
   });
   const storeName = (id) => { const s = stores.find((x) => x.id === id); return s ? s.name : id; };
   function togglePick(id) { setPicked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
+  async function addPicked() {
+    const r = await jpost(ui, "/api/stores/" + encodeURIComponent(storeId) + "/plan", Object.assign({ productIds: [...picked] }, bulk, { sectionId: bulk.sectionId || null }));
+    if (!r || r.error) return notify((r && r.error) || "Couldn't add those", "error");
+    notify(`${r.added} added to ${storeName(storeId)}${r.skipped ? `, ${r.skipped} already there` : ""}`);
+    setPicked(new Set());
+    loadPlan(storeId);
+  }
   async function setCategory(category) {
     const ids = [...picked];
     const r = await jpost(ui, "/api/products/category", { ids, category });
@@ -1014,6 +1022,27 @@ function CatalogPanel({ ui, notify }) {
           </select>
           {storeId && plan && <span style={{ fontSize: 13, color: T.sub }}>{plan.count} item{plan.count === 1 ? "" : "s"}</span>}
         </div>
+        {/* The bridge from the product list to the plan. Appears the moment
+            anything is ticked on the left, because "I selected them, now
+            what" was the actual dead end. */}
+        {picked.size > 0 && <div style={{ background: T.navySoft, border: `1.5px solid ${T.navy}`, borderRadius: 12, padding: 12, marginBottom: 12 }}>
+          <div style={{ fontFamily: ui.HEAD, fontWeight: 700, fontSize: 14, color: T.ink, marginBottom: 8 }}>
+            {picked.size} product{picked.size === 1 ? "" : "s"} selected{storeId ? <> — add to <b>{storeName(storeId)}</b></> : null}
+          </div>
+          {!storeId ? <div style={{ fontSize: 13, color: T.sub }}>Choose a store above first.</div> : <>
+            <div style={{ display: "grid", gridTemplateColumns: "70px 70px 70px 1fr 1fr auto", gap: 6, alignItems: "end" }}>
+              <Field label="Aisle"><input value={bulk.aisle} onChange={(e) => setBulk({ ...bulk, aisle: e.target.value })} placeholder="Beer" style={inputStyle} /></Field>
+              <Field label="Bay"><input value={bulk.bay} onChange={(e) => setBulk({ ...bulk, bay: e.target.value })} style={inputStyle} /></Field>
+              <Field label="Shelf"><input value={bulk.shelf} onChange={(e) => setBulk({ ...bulk, shelf: e.target.value })} style={inputStyle} /></Field>
+              <Field label="Section"><select value={bulk.sectionId} onChange={(e) => setBulk({ ...bulk, sectionId: e.target.value })} style={inputStyle}><option value="">—</option>{sections.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}</select></Field>
+              <Field label="Note"><input value={bulk.note} onChange={(e) => setBulk({ ...bulk, note: e.target.value })} placeholder="optional" style={inputStyle} /></Field>
+              <Btn ui={ui} small onClick={addPicked} style={{ height: 40 }}>Add {picked.size}</Btn>
+            </div>
+            <div style={{ fontSize: 11.5, color: T.sub, marginTop: 8, lineHeight: 1.5 }}>
+              They all go to the same spot — which is right for a beer aisle. Leave Aisle blank if this store's beer isn't numbered; the section name carries it. Anything already on the plan at that spot is skipped, not duplicated.
+            </div>
+          </>}
+        </div>}
         {!storeId && <Empty ui={ui} icon="MapPin" title="Pick a store" body="Then add the products a merchandiser should check there." />}
         {storeId && <>
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
