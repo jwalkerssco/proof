@@ -12,6 +12,17 @@ database, not the sessions. Read `README.md` first; it carries the layout and th
 2. **Migrations run at startup, in `DB.register` order, once each.** Append a new one; never edit
    an applied one — write a new entry that alters. `CREATE ... IF NOT EXISTS` everywhere so a
    re-run is a no-op.
+2a. **NEVER approve a publish-time migration that contains `DROP` or `ALTER`. Cancel it.**
+   Replit's publish pipeline diffs the *development* database against *production* and offers SQL
+   to make prod match dev. Because Proof migrates at boot, production gets a new column the moment
+   a new build starts, while dev only gets it when the app is next run in the workspace — so the
+   pipeline reads correct behaviour as drift and proposes deleting it. Observed 2026-09-21, one
+   click from dropping `category` off 531 products and undoing the beer/NA feature.
+   **The fix is to keep dev in step, so the diff is empty by construction:**
+   ```bash
+   npm run migrate      # after any pull that adds a migration, BEFORE republishing
+   ```
+   Cancelling a publish costs a minute. Approving one costs data.
 3. **Proof reads and writes only `proof_*` tables** (plus `branches` and `schema_migrations`).
    Keep it that way; it is what keeps the app portable.
 4. **No timer is ever stored.** Timestamps in, durations derived on read. A forgotten visit
@@ -34,6 +45,16 @@ npm test          # pure-function tests + SSR of every screen, no DB
 npm run build     # public/bundle.js
 node --check server.js lib/db.js lib/auth.js proof/index.js proof/schema.js
 ```
+
+Deploying a pull, in order:
+
+```bash
+git fetch origin main && git merge --no-edit FETCH_HEAD
+npm install && npm run build
+npm run migrate     # brings the DEV database in step -- skip it and the publish step offers to DROP
+```
+…then Republish. `npm run migrate` prints the database host it touched and what it applied; it
+never prints the credential.
 
 Bump `MARKER` in `server.js` with any change; `GET /api/health` reports it, so "is the new build
 live" is one request.
