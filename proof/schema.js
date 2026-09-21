@@ -305,4 +305,27 @@ async function migratePoints(pool) {
   return { migration: "006_points", tables: made };
 }
 
-module.exports = { migrateIdentity, migrateOps, migrateCatalog, migrateVisits, migratePoints };
+/* Category (beer / non-alc / whatever comes next) on the product, and on the
+ * visit. Deliberately NO CHECK constraint on either: the set of categories a
+ * branch cares about is data, not schema, and a new one should never need a
+ * migration. The API validates against PRODUCT_CATEGORIES instead.
+ *
+ * One category PER VISIT, not a switch mid-visit. Working beer and then NA at
+ * one store is two visits, which the app already supports (a second visit at
+ * the same store is normal) and which keeps "how long did beer take" a
+ * measured number rather than an apportioned one.
+ */
+async function migrateCategories(pool) {
+  const added = [];
+  async function col(table, name, ddl) {
+    await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${name} ${ddl}`);
+    added.push(table + "." + name);
+  }
+  await col("proof_products", "category", "text");
+  await col("proof_visits", "category", "text");
+  await pool.query("CREATE INDEX IF NOT EXISTS proof_products_category_idx ON proof_products (branch_id, category) WHERE active");
+  await pool.query("CREATE INDEX IF NOT EXISTS proof_visits_category_idx ON proof_visits (branch_id, category, started_at)");
+  return { migration: "007_categories", columns: added };
+}
+
+module.exports = { migrateIdentity, migrateOps, migrateCatalog, migrateVisits, migratePoints, migrateCategories };

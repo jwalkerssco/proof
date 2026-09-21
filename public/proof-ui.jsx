@@ -314,21 +314,28 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
   const [photoCounts, setPhotoCounts] = useState({ total: 0, byGroup: {} });
   const [thumbs, setThumbs] = useState({});        // groupKey -> [dataUrl] (this session only)
   const [starting, setStarting] = useState(false);
+  const [working, setWorking] = useState(null); // the category this visit is for
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [ending, setEnding] = useState(false);
   const [err, setErr] = useState("");
   const fileRef = useRef(null);
   const pendingGroup = useRef(null);
 
+  // The plan is re-read once a category is chosen, so the walk only shows
+  // what belongs to it -- a beer trip should not scroll past the water.
   useEffect(() => {
-    jget(ui, "/api/stores/" + encodeURIComponent(storeId) + "/detail").then(setDetail).catch(() => setErr("Couldn't load this store."));
+    const qs = working ? "?category=" + encodeURIComponent(working) : "";
+    jget(ui, "/api/stores/" + encodeURIComponent(storeId) + "/detail" + qs).then((d) => { if (d && d.error) setErr(d.error); else setDetail(d); });
+  }, [storeId, working]);
+  useEffect(() => {
     // Resume: the open visit at THIS store, with what was already checked.
     if (openVisit && openVisit.visit && String(openVisit.visit.storeId) === String(storeId)) {
       setVisit(openVisit.visit);
+      setWorking(openVisit.visit.category || null);
       jget(ui, "/api/visits/" + openVisit.visit.id).then((d) => {
         if (!d || d.error) return;
         const st = {};
-        (d.results || []).forEach((r) => { if (r.plan_item_id != null) st[r.plan_item_id] = r.status; }); // rows are in insert order: last wins
+        (d.items || []).forEach((r) => { if (r.planItemId != null) st[r.planItemId] = r.status; }); // in order: last wins
         setStatuses(st);
         setPhotoCounts({ total: (d.photos || []).length, byGroup: {} });
       });
@@ -337,16 +344,19 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
 
   const groups = (detail && detail.plan && detail.plan.groups) || [];
   const totalItems = groups.reduce((n, g) => n + g.items.length, 0);
+  const CATS = [{ id: "beer", label: "Beer" }, { id: "na", label: "Non-alc" }];
+  const planCats = CATS.filter((c) => ((detail && detail.plan && detail.plan.categories) || []).indexOf(c.id) !== -1);
   const checked = Object.keys(statuses).length;
   const blockedElsewhere = openVisit && openVisit.visit && String(openVisit.visit.storeId) !== String(storeId);
 
-  async function startVisit() {
+  async function startVisit(category) {
     setStarting(true); setErr("");
     const geo = await getGeo();
-    const r = await jpost(ui, "/api/visits/start", { storeId, atClient: new Date().toISOString(), ...geo });
+    const r = await jpost(ui, "/api/visits/start", { storeId, atClient: new Date().toISOString(), category: category || null, ...geo });
     setStarting(false);
     if (!r || r.error) { setErr(r && r.error ? r.error : "Couldn't start the visit."); return; }
     setVisit(r.visit);
+    setWorking(category || null);
     if (r.open) notify("Resumed your open visit");
   }
   function groupKey(g) { return g.items[0] && g.items[0].sectionId != null ? "s" + g.items[0].sectionId : "a" + g.aisle; }
@@ -410,8 +420,25 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
             <div style={{ fontWeight: 700, color: T.ink, fontSize: 14.5 }}>Finish your visit at {openVisit.storeName} first</div>
             <div style={{ fontSize: 13, color: T.sub, marginTop: 4, lineHeight: 1.5 }}>Only one visit can be open at a time. Go back to Today to close it.</div>
           </Card> : <>
-            <Btn ui={ui} block icon="MapPin" onClick={startVisit} disabled={starting}>{starting ? "Getting your location…" : "Start Visit"}</Btn>
-            <div style={{ fontSize: 12, color: T.mute, textAlign: "center", marginTop: 10 }}>Your location is noted when you start. That's it — no clock to watch.</div>
+            {/* What are you working? Asked ONLY when this store's plan
+                actually spans more than one category -- otherwise it is a
+                pointless tap. One category per visit: working beer and then
+                non-alc at the same store is two visits, which keeps "how
+                long did beer take" a measured number instead of a guess. */}
+            {planCats.length > 1 ? <Card>
+              <Eyebrow ui={ui}>What are you working?</Eyebrow>
+              <div style={{ display: "grid", gap: 8 }}>
+                {planCats.map((c) => (
+                  <Btn key={c.id} ui={ui} block kind={c.id === "beer" ? "primary" : "ghost"} disabled={starting} onClick={() => startVisit(c.id)}>
+                    {starting ? "Starting…" : c.label}
+                  </Btn>
+                ))}
+                <button onClick={() => startVisit(null)} disabled={starting} style={{ background: "none", border: "none", color: T.sub, fontSize: 12.5, fontWeight: 600, cursor: "pointer", padding: "6px 0" }}>Both / everything</button>
+              </div>
+            </Card> : <>
+              <Btn ui={ui} block icon="MapPin" onClick={() => startVisit(planCats[0] ? planCats[0].id : null)} disabled={starting}>{starting ? "Getting your location…" : "Start Visit"}</Btn>
+              <div style={{ fontSize: 12, color: T.mute, textAlign: "center", marginTop: 10 }}>Your location is noted when you start. That's it — no clock to watch.</div>
+            </>}
           </>}
         </>}
       </div>
@@ -420,7 +447,7 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
 
   /* ---- in-visit ---- */
   return <div style={{ height: "100%", display: "flex", flexDirection: "column", background: T.bg }}>
-    <TopBar ui={ui} title={title} sub="Visit in progress" onBack={onExit} right={<Badge tone="green">LIVE</Badge>} />
+    <TopBar ui={ui} title={title} sub={working ? "Working " + (CATS.find((c) => c.id === working) || {}).label : "Visit in progress"} onBack={onExit} right={<Badge tone="green">LIVE</Badge>} />
     <div style={{ padding: "10px 16px", borderBottom: `1px solid ${T.line}`, display: "flex", alignItems: "center", gap: 12, background: "#fff" }}>
       <div style={{ flex: 1 }}>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.sub, marginBottom: 5 }}>
@@ -838,6 +865,8 @@ function CatalogPanel({ ui, notify }) {
   const [prodFile, setProdFile] = useState(null);
   const [prodBusy, setProdBusy] = useState(false);
   const [showProdPaste, setShowProdPaste] = useState(false);
+  const [catFilter, setCatFilter] = useState("");
+  const [picked, setPicked] = useState(new Set());
 
   function loadProducts() { jget(ui, "/api/products?limit=500").then((r) => setProducts((r && r.products) || [])); }
   function loadPlan(id) {
@@ -875,8 +904,22 @@ function CatalogPanel({ ui, notify }) {
     await jpost(ui, "/api/stores/" + encodeURIComponent(storeId) + "/sections", { label: newSection.trim(), ord: sections.length });
     setNewSection(""); notify("Section added"); loadPlan(storeId);
   }
-  const visible = (products || []).filter((p) => !pq || String(p.name).toLowerCase().includes(pq.toLowerCase()) || String(p.itemNo || "").includes(pq));
+  const visible = (products || []).filter((p) => {
+    if (pq && !(String(p.name).toLowerCase().includes(pq.toLowerCase()) || String(p.brand || "").toLowerCase().includes(pq.toLowerCase()) || String(p.itemNo || "").includes(pq))) return false;
+    if (catFilter === "none") return !p.category;
+    if (catFilter) return p.category === catFilter;
+    return true;
+  });
   const storeName = (id) => { const s = stores.find((x) => x.id === id); return s ? s.name : id; };
+  function togglePick(id) { setPicked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
+  async function setCategory(category) {
+    const ids = [...picked];
+    const r = await jpost(ui, "/api/products/category", { ids, category });
+    if (!r || r.error) return notify((r && r.error) || "Couldn't set that", "error");
+    setPicked(new Set());
+    notify(`${r.updated} product${r.updated === 1 ? "" : "s"} marked ${category === "beer" ? "Beer" : "Non-alc"}`);
+    loadProducts();
+  }
 
   return <div>
     <PanelHead ui={ui} title="Catalog & store plans" body="Products are the branch's catalog. A store plan is what a merchandiser checks off in that store — each row is a product and where it lives (aisle / bay / shelf). Sections are optional groupings like Cooler or Beer Cave; they're what time gets measured against." />
@@ -890,11 +933,28 @@ function CatalogPanel({ ui, notify }) {
           <textarea value={paste} onChange={(e) => setPaste(e.target.value)} rows={4} placeholder={"Name\tItem #\tBrand\tPack"} style={Object.assign({}, inputStyle, { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, resize: "vertical", marginTop: 8 })} />
           <Btn ui={ui} small style={{ marginTop: 8 }} onClick={uploadProducts} disabled={!paste.trim()}>Save products</Btn>
         </>}
-        <input value={pq} onChange={(e) => setPq(e.target.value)} placeholder="Search products…" style={Object.assign({}, inputStyle, { marginTop: 14, padding: "7px 10px", fontSize: 13 })} />
+        <input value={pq} onChange={(e) => setPq(e.target.value)} placeholder="Search name or brand…" style={Object.assign({}, inputStyle, { marginTop: 14, padding: "7px 10px", fontSize: 13 })} />
+        {/* Categorising the catalog is what makes beer-vs-NA measurable, and
+            no export arrives with our own split -- so it is a multi-select
+            plus one button rather than editing products one at a time. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+          {[["", "All"], ["beer", "Beer"], ["na", "Non-alc"], ["none", "Uncategorised"]].map(([v, label]) => (
+            <button key={v || "all"} onClick={() => setCatFilter(v)} style={{ padding: "4px 10px", borderRadius: 999, border: `1px solid ${catFilter === v ? T.navy : T.line}`, background: catFilter === v ? T.navySoft : "#fff", color: catFilter === v ? T.navy : T.sub, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>{label}</button>
+          ))}
+          <div style={{ flex: 1 }} />
+          {picked.size > 0 && <>
+            <span style={{ fontSize: 12, color: T.sub }}>{picked.size} picked</span>
+            <Btn ui={ui} small onClick={() => setCategory("beer")}>Mark Beer</Btn>
+            <Btn ui={ui} small kind="ghost" onClick={() => setCategory("na")}>Mark Non-alc</Btn>
+          </>}
+        </div>
         <div style={{ maxHeight: 420, overflowY: "auto", marginTop: 6 }}>
-          {products && !products.length && <Empty ui={ui} icon="ClipboardList" title="No products yet" body="Paste the catalog above." />}
+          {products && !products.length && <Empty ui={ui} icon="ClipboardList" title="No products yet" body="Upload the catalog above." />}
+          {products && products.length > 0 && !visible.length && <div style={{ fontSize: 12.5, color: T.mute, padding: "10px 2px" }}>Nothing here.</div>}
           {visible.map((p) => <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 2px", borderTop: `1px solid ${T.line}`, fontSize: 13 }}>
+            <input type="checkbox" checked={picked.has(p.id)} onChange={() => togglePick(p.id)} />
             <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontWeight: 600, color: T.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div><div style={{ fontSize: 11.5, color: T.mute }}>{[p.itemNo && "#" + p.itemNo, p.brand, p.pack].filter(Boolean).join(" · ")}</div></div>
+            {p.category ? <Badge tone={p.category === "beer" ? "navy" : "green"}>{p.category === "beer" ? "Beer" : "Non-alc"}</Badge> : <Badge tone="amber">Uncategorised</Badge>}
             <button onClick={() => setConfirm({ title: `Remove ${p.name}?`, body: "It comes off every store plan too.", run: () => jpost(ui, "/api/products/" + encodeURIComponent(p.id) + "/remove", {}).then(() => { notify("Product removed"); loadProducts(); loadPlan(storeId); }) })} aria-label="Remove" style={{ background: "none", border: "none", cursor: "pointer", padding: 4, lineHeight: 0 }}><Icon ui={ui} name="Trash2" size={14} color={T.mute} /></button>
           </div>)}
         </div>
@@ -1203,14 +1263,22 @@ function ReportingPanel({ ui }) {
   const [from, setFrom] = useState(new Date(today.getTime() - 29 * 86400000).toISOString().slice(0, 10));
   const [to, setTo] = useState(today.toISOString().slice(0, 10));
   const [includeAuto, setIncludeAuto] = useState(false);
+  const [tab, setTab] = useState("stores");
   const [rows, setRows] = useState(null);
-  useEffect(() => {
-    const qs = "?from=" + from + "&to=" + to + "T23:59:59" + (includeAuto ? "&includeAutoClosed=1" : "");
-    jget(ui, "/api/admin/reporting" + qs).then((r) => setRows((r && r.rows) || []));
-  }, [from, to, includeAuto]);
+  const [cats, setCats] = useState(null);
+  const [brands, setBrands] = useState(null);
+  const qs = "?from=" + from + "&to=" + to + "T23:59:59" + (includeAuto ? "&includeAutoClosed=1" : "");
+  useEffect(() => { jget(ui, "/api/admin/reporting" + qs).then((r) => setRows((r && r.rows) || [])); }, [from, to, includeAuto]);
+  useEffect(() => { if (tab === "categories") jget(ui, "/api/admin/reporting/categories" + qs).then(setCats); }, [tab, from, to, includeAuto]);
+  useEffect(() => { if (tab === "brands") jget(ui, "/api/admin/reporting/brands" + qs).then(setBrands); }, [tab, from, to, includeAuto]);
   const totalVisits = (rows || []).reduce((n, r) => n + r.visits, 0);
   return <div>
-    <PanelHead ui={ui} title="Reporting" body="Time in store, by store. Only visits ended by pressing End Visit count by default — a visit closed by the nightly sweep or from the next store's parking lot is a known unknown, not a measurement." />
+    <PanelHead ui={ui} title="Reporting" body="Where the time goes. Only visits ended by pressing End Visit count by default — a visit closed by the nightly sweep or from the next store's parking lot is a known unknown, not a measurement." />
+    <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+      {[["stores", "By store"], ["categories", "Beer vs Non-alc"], ["brands", "Effort by brand"]].map(([id, label]) => (
+        <button key={id} onClick={() => setTab(id)} style={{ padding: "7px 14px", borderRadius: 9, border: `1px solid ${tab === id ? T.navy : T.line}`, background: tab === id ? T.navy : "#fff", color: tab === id ? "#fff" : T.sub, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>{label}</button>
+      ))}
+    </div>
     <Card pad={14} style={{ display: "flex", gap: 14, alignItems: "end", flexWrap: "wrap" }}>
       <Field label="From"><input type="date" value={from} onChange={(e) => setFrom(e.target.value)} style={Object.assign({}, inputStyle, { width: 160 })} /></Field>
       <Field label="To"><input type="date" value={to} onChange={(e) => setTo(e.target.value)} style={Object.assign({}, inputStyle, { width: 160 })} /></Field>
@@ -1218,7 +1286,7 @@ function ReportingPanel({ ui }) {
       <div style={{ flex: 1 }} />
       <div style={{ fontSize: 13, color: T.sub, paddingBottom: 10 }}><b style={{ color: T.ink }}>{totalVisits}</b> visits across <b style={{ color: T.ink }}>{(rows || []).length}</b> stores</div>
     </Card>
-    <Card>
+    {tab === "stores" && <Card>
       {rows && !rows.length && <Empty ui={ui} icon="Search" title="No finished visits in this range" body="Widen the dates, or include auto-closed visits." />}
       {rows && rows.length > 0 && <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 100px 130px", gap: 12, padding: "4px 4px 8px", fontSize: 11.5, fontWeight: 700, color: T.mute, textTransform: "uppercase", letterSpacing: 0.5 }}><div>Store</div><div>Chain</div><div style={{ textAlign: "right" }}>Visits</div><div style={{ textAlign: "right" }}>Avg time</div></div>}
       {(rows || []).map((r) => <div key={r.storeId} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 100px 130px", gap: 12, padding: "9px 4px", borderTop: `1px solid ${T.line}`, fontSize: 13.5 }}>
@@ -1227,7 +1295,50 @@ function ReportingPanel({ ui }) {
         <div style={{ textAlign: "right", color: T.ink }}>{r.visits}</div>
         <div style={{ textAlign: "right", fontWeight: 700, color: T.ink }}>{r.avgMinutes != null ? `${r.avgMinutes} min` : "—"}</div>
       </div>)}
-    </Card>
+    </Card>}
+
+    {tab === "categories" && <Card>
+      {!cats && <div style={{ color: T.mute }}>Loading…</div>}
+      {cats && !cats.rows.length && <Empty ui={ui} icon="Clock" title="No finished visits in this range" body="Once merchandisers pick Beer or Non-alc at Start Visit, the split lands here." />}
+      {cats && cats.rows.length > 0 && <>
+        <div style={{ display: "flex", height: 26, borderRadius: 7, overflow: "hidden", marginBottom: 14, border: `1px solid ${T.line}` }}>
+          {cats.rows.map((r) => <div key={r.category || "unset"} title={`${r.label}: ${r.minutes} min`} style={{ width: (r.sharePct || 0) + "%", background: r.category === "beer" ? T.navy : r.category === "na" ? T.green : T.mute, color: "#fff", fontSize: 11, fontWeight: 700, display: "grid", placeItems: "center" }}>{(r.sharePct || 0) >= 8 ? r.sharePct + "%" : ""}</div>)}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 90px 90px 90px 110px", gap: 12, padding: "4px 4px 8px", fontSize: 11.5, fontWeight: 700, color: T.mute, textTransform: "uppercase", letterSpacing: 0.5 }}>
+          <div>Category</div><div style={{ textAlign: "right" }}>Visits</div><div style={{ textAlign: "right" }}>Items</div><div style={{ textAlign: "right" }}>Avg visit</div><div style={{ textAlign: "right" }}>Total time</div>
+        </div>
+        {cats.rows.map((r) => <div key={r.category || "unset"} style={{ display: "grid", gridTemplateColumns: "1fr 90px 90px 90px 110px", gap: 12, padding: "9px 4px", borderTop: `1px solid ${T.line}`, fontSize: 13.5 }}>
+          <div style={{ fontWeight: 600, color: T.ink }}>{r.category ? r.label : <span style={{ color: T.sub }}>Not specified</span>}</div>
+          <div style={{ textAlign: "right" }}>{r.visits}</div>
+          <div style={{ textAlign: "right" }}>{r.items}</div>
+          <div style={{ textAlign: "right" }}>{r.avgMinutes == null ? "—" : r.avgMinutes + " min"}</div>
+          <div style={{ textAlign: "right", fontWeight: 700 }}>{r.minutes == null ? "—" : r.minutes + " min"}</div>
+        </div>)}
+        <div style={{ fontSize: 11.5, color: T.mute, marginTop: 10, lineHeight: 1.5 }}>
+          This is <b>measured</b>, not apportioned: a visit carries the category the merchandiser picked, so its whole length belongs to that category. Visits started before categories existed, or where they chose "both", show as <i>Not specified</i>.
+        </div>
+      </>}
+    </Card>}
+
+    {tab === "brands" && <Card>
+      {!brands && <div style={{ color: T.mute }}>Loading…</div>}
+      {brands && !brands.rows.length && <Empty ui={ui} icon="Search" title="Nothing marked in this range" body="This builds from items merchandisers tick off during a visit." />}
+      {brands && brands.rows.length > 0 && <>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 110px 90px 110px 110px", gap: 12, padding: "4px 4px 8px", fontSize: 11.5, fontWeight: 700, color: T.mute, textTransform: "uppercase", letterSpacing: 0.5 }}>
+          <div>Brand</div><div>Category</div><div style={{ textAlign: "right" }}>Items</div><div style={{ textAlign: "right" }}>Median / item</div><div style={{ textAlign: "right" }}>Total est.</div>
+        </div>
+        {brands.rows.map((r) => <div key={r.brand + (r.category || "")} style={{ display: "grid", gridTemplateColumns: "1fr 110px 90px 110px 110px", gap: 12, padding: "9px 4px", borderTop: `1px solid ${T.line}`, fontSize: 13.5 }}>
+          <div style={{ fontWeight: 600, color: T.ink }}>{r.brand}</div>
+          <div>{r.category ? <Badge tone={r.category === "beer" ? "navy" : "green"}>{r.categoryLabel}</Badge> : <span style={{ color: T.mute, fontSize: 12 }}>—</span>}</div>
+          <div style={{ textAlign: "right" }}>{r.items}</div>
+          <div style={{ textAlign: "right" }}>{secs(r.medianSeconds)}</div>
+          <div style={{ textAlign: "right", fontWeight: 700 }}>{r.minutes} min</div>
+        </div>)}
+        <div style={{ fontSize: 11.5, color: T.mute, marginTop: 10, lineHeight: 1.5 }}>
+          <b>Estimated.</b> Time per item is the gap between consecutive marks during a visit, so the first item of a section includes walking to it and a photo lands inside the gap. Each gap is capped at {Math.round(brands.capSeconds / 60)} minutes before it counts, so one long pause can't land on whatever brand came next{brands.cappedTotal ? ` (${brands.cappedTotal} gap${brands.cappedTotal === 1 ? " was" : "s were"} capped in this range)` : ""}. Read the median across many visits, not a single row.
+        </div>
+      </>}
+    </Card>}
   </div>;
 }
 

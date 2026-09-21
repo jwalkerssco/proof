@@ -43,6 +43,7 @@ DB.register("003_ops", (pool) => SCHEMA.migrateOps(pool));
 DB.register("004_catalog", (pool) => SCHEMA.migrateCatalog(pool));
 DB.register("005_visits", (pool) => SCHEMA.migrateVisits(pool));
 DB.register("006_points", (pool) => SCHEMA.migratePoints(pool));
+DB.register("007_categories", (pool) => SCHEMA.migrateCategories(pool));
 
 const PROOF = PROOF_MOD.create({
   getPool: DB.getPool, BRANCHES, SESSION_MS: AUTH.SESSION_MS,
@@ -67,7 +68,7 @@ const wrap = (fn) => async (req, res) => {
   try { const out = await fn(req); if (out && out.error) return res.status(out.pending ? 200 : 400).json(out); res.json(out); }
   catch (e) { console.error("[proof]", req.method, req.path, e && e.message); res.status(503).json({ error: "unavailable" }); }
 };
-const MARKER = "proof-0.3.0";
+const MARKER = "proof-0.4.0";
 
 app.get("/api/health", (req, res) => res.json({ ok: true, ready, marker: MARKER, node: process.version, at: new Date().toISOString() }));
 app.get("/api/migrations", requireRole("proofadmin"), wrap(() => DB.listMigrations()));
@@ -105,10 +106,11 @@ app.post("/api/stores/upload-file", requireRole("proofadmin"), upload.single("fi
     res.status(out && out.error && !out.preview ? 400 : 200).json(Object.assign({ file: req.file.originalname, sheet: parsed.sheet, sheets: parsed.sheets, headerRow: parsed.headerRow }, out));
   } catch (e) { console.error("[proof] stores/upload-file", e && e.message); res.status(503).json({ error: "Couldn't read that file." }); }
 });
-app.get("/api/stores/:id/detail", requireRole("proof", "proofadmin"), wrap((req) => PROOF.storeDetail(req.session.branch, req.params.id)));
+app.get("/api/stores/:id/detail", requireRole("proof", "proofadmin"), wrap((req) => PROOF.storeDetail(req.session.branch, req.params.id, req.query.category)));
+app.get("/api/categories", requireRole("proof", "proofadmin"), (req, res) => res.json({ categories: PROOF_MOD.PRODUCT_CATEGORIES }));
 app.get("/api/stores/:id/sections", requireRole("proof", "proofadmin"), wrap((req) => PROOF.sections(req.session.branch, req.params.id)));
 app.post("/api/stores/:id/sections", requireRole("proofadmin"), wrap((req) => PROOF.sectionSave(req.session.branch, req.params.id, req.body || {})));
-app.get("/api/stores/:id/plan", requireRole("proof", "proofadmin"), wrap((req) => PROOF.planItems(req.session.branch, req.params.id)));
+app.get("/api/stores/:id/plan", requireRole("proof", "proofadmin"), wrap((req) => PROOF.planItems(req.session.branch, req.params.id, req.query.category)));
 app.post("/api/stores/:id/plan", requireRole("proofadmin"), wrap((req) => {
   const b = req.body || {};
   if (b.copyFrom) return PROOF.planItemsCopy(req.session.branch, b.copyFrom, req.params.id);
@@ -137,7 +139,8 @@ app.post("/api/blocks/:id/members", requireRole("proofadmin"), wrap((req) => {
 }));
 
 /* ---- catalog ---- */
-app.get("/api/products", requireRole("proof", "proofadmin"), wrap((req) => PROOF.products(req.session.branch, { q: req.query.q, limit: req.query.limit })));
+app.get("/api/products", requireRole("proof", "proofadmin"), wrap((req) => PROOF.products(req.session.branch, { q: req.query.q, limit: req.query.limit, category: req.query.category })));
+app.post("/api/products/category", requireRole("proofadmin"), wrap((req) => { const b = req.body || {}; return PROOF.productsSetCategory(req.session.branch, b.ids, b.category); }));
 app.post("/api/products", requireRole("proofadmin"), wrap((req) => { const b = req.body || {}; return b.rows ? PROOF.productsUpload(req.session.branch, b.rows, { apply: !!b.apply }) : PROOF.productSave(req.session.branch, b); }));
 app.post("/api/products/:id/remove", requireRole("proofadmin"), wrap((req) => PROOF.productRemove(req.session.branch, req.params.id)));
 app.post("/api/products/upload-file", requireRole("proofadmin"), upload.single("file"), async (req, res) => {
@@ -153,7 +156,7 @@ app.post("/api/products/upload-file", requireRole("proofadmin"), upload.single("
 /* ---- visits: every write requires an open visit owned by the caller ---- */
 app.get("/api/visits/open", requireRole("proof", "proofadmin"), wrap((req) => PROOF.blockedOpenVisit(req.session).then((v) => ({ open: !!v, ...(v || {}) }))));
 app.get("/api/visits/mine", requireRole("proof", "proofadmin"), wrap((req) => PROOF.myVisits(req.session, req.query.date)));
-app.post("/api/visits/start", requireRole("proof", "proofadmin"), wrap((req) => { const b = req.body || {}; return PROOF.startVisit(req.session, { storeId: b.storeId, blockId: b.blockId, lat: b.lat, lng: b.lng, accuracy: b.accuracy, geoDenied: !!b.geoDenied, deviceId: b.deviceId, atClient: b.atClient }); }));
+app.post("/api/visits/start", requireRole("proof", "proofadmin"), wrap((req) => { const b = req.body || {}; return PROOF.startVisit(req.session, { storeId: b.storeId, blockId: b.blockId, lat: b.lat, lng: b.lng, accuracy: b.accuracy, geoDenied: !!b.geoDenied, deviceId: b.deviceId, atClient: b.atClient, category: b.category }); }));
 app.post("/api/visits/:id/section-enter", requireRole("proof", "proofadmin"), wrap((req) => { const sid = (req.body || {}).sectionId; return PROOF.sectionEnter(Number(req.params.id), sid != null ? Number(sid) : null, (req.body || {}).atClient); }));
 app.post("/api/visits/:id/section-exit", requireRole("proof", "proofadmin"), wrap((req) => { const sid = (req.body || {}).sectionId; return PROOF.sectionExit(Number(req.params.id), sid != null ? Number(sid) : null, (req.body || {}).atClient); }));
 app.post("/api/visits/:id/item-result", requireRole("proof", "proofadmin"), wrap((req) => { const b = req.body || {}; return PROOF.itemResult(Number(req.params.id), b.planItemId, b.status, b.note); }));
@@ -176,6 +179,8 @@ app.get("/api/photos/:id", requireRole("proof", "proofadmin"), async (req, res) 
 /* ---- admin views, points ---- */
 app.get("/api/admin/live", requireRole("proofadmin"), wrap((req) => PROOF.liveCompletion(req.session.branch, req.query.date)));
 app.get("/api/admin/reporting", requireRole("proofadmin"), wrap((req) => PROOF.reporting(req.session.branch, { from: req.query.from, to: req.query.to, includeAutoClosed: req.query.includeAutoClosed === "1" })));
+app.get("/api/admin/reporting/categories", requireRole("proofadmin"), wrap((req) => PROOF.reportCategories(req.session.branch, { from: req.query.from, to: req.query.to, includeAutoClosed: req.query.includeAutoClosed === "1" })));
+app.get("/api/admin/reporting/brands", requireRole("proofadmin"), wrap((req) => PROOF.reportBrands(req.session.branch, { from: req.query.from, to: req.query.to, category: req.query.category, includeAutoClosed: req.query.includeAutoClosed === "1" })));
 app.get("/api/leaderboard", requireRole("proof", "proofadmin"), wrap((req) => PROOF.leaderboard(req.session.branch, req.query.period || new Date().toISOString().slice(0, 7))));
 app.post("/api/admin/points", requireRole("proofadmin"), wrap((req) => { const b = req.body || {}; return PROOF.awardPoints(req.session.branch, b.merchId, b.periodKey || new Date().toISOString().slice(0, 7), Number(b.points), b.reason, b.visitId); }));
 

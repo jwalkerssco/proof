@@ -49,6 +49,17 @@ const TRUCK_START = "04:30", DEFAULT_START = "08:00";
 // work. Awarded rows, never a derived aggregate (proof_points).
 const POINTS_PER_VISIT = 10, POINTS_PER_PHOTO = 1, POINTS_PHOTO_CAP = 10;
 
+/* What a merchandiser can be "working" on a visit. Data, not schema -- no
+   CHECK constraint backs this, so adding Energy or Wine later is one line
+   here and nothing in the database. `all` is not a category; it is the
+   absence of a filter, and a visit stores null for it. */
+const PRODUCT_CATEGORIES = [
+  { id: "beer", label: "Beer" },
+  { id: "na", label: "Non-alc" },
+];
+function categoryLabel(id) { const c = PRODUCT_CATEGORIES.find((x) => x.id === id); return c ? c.label : (id || "Everything"); }
+function validCategory(id) { return id == null || id === "" ? null : (PRODUCT_CATEGORIES.some((c) => c.id === id) ? id : undefined); }
+
 // Pure -- the truck-day default rule (S027 lesson, carried forward): flipping
 // the truck flag re-defaults the start time UNLESS the SAME call also passed
 // an explicit startTime. "mark as truck day" must not silently leave an
@@ -109,7 +120,17 @@ function colMap(header) {
   Object.keys(STORE_HEADERS).forEach((k) => { const i = norm.findIndex((h) => STORE_HEADERS[k].indexOf(h) !== -1); if (i !== -1) map[k] = i; });
   return map;
 }
-const PROD_HEADERS = { name: ["name", "product", "description"], brand: ["brand"], pack: ["pack", "package"], itemNo: ["item no", "itemno", "item#", "item #", "sku"] };
+const PROD_HEADERS = { name: ["name", "product", "description"], brand: ["brand"], pack: ["pack", "package"], itemNo: ["item no", "itemno", "item#", "item #", "sku"], category: ["category", "cat", "class", "segment"] };
+/* A spreadsheet says "Beer", "NA", "Non Alc", "N/A". Map the spellings people
+   actually type; anything unrecognised is left null rather than guessed, and
+   shows up as uncategorised on the Catalog screen. */
+function normCategory(v) {
+  const s = String(v == null ? "" : v).trim().toLowerCase();
+  if (!s) return null;
+  if (/^(beer|malt|alc|alcohol|bud|domestic|import|craft)/.test(s)) return "beer";
+  if (/^(na\b|n\/?a|non.?alc|nonalc|soft|water|energy|tea|juice|soda)/.test(s)) return "na";
+  return null;
+}
 function prodColMap(header) {
   const norm = header.map((h) => String(h || "").trim().toLowerCase());
   const map = {};
@@ -340,10 +361,10 @@ function create(deps) {
     return { stores: r.rows };
   }
 
-  async function storeDetail(branch, storeId) {
+  async function storeDetail(branch, storeId, category) {
     const [s, plan] = await Promise.all([
       pool().query("SELECT * FROM proof_stores WHERE branch_id = $1 AND id = $2", [branch, storeId]),
-      planItems(branch, storeId),
+      planItems(branch, storeId, category),
     ]);
     return { store: s.rows[0] || null, plan };
   }
@@ -540,34 +561,41 @@ function create(deps) {
 
   /* ============================== Catalog ================================== */
 
-  const PROD_HEADERS = { name: ["name", "product", "description"], brand: ["brand"], pack: ["pack", "package"], itemNo: ["item no", "itemno", "item#", "item #", "sku"] };
-  function _prodColMap(header) {
-    const norm = header.map((h) => String(h || "").trim().toLowerCase());
-    const map = {};
-    Object.keys(PROD_HEADERS).forEach((k) => { const i = norm.findIndex((h) => PROD_HEADERS[k].indexOf(h) !== -1); if (i !== -1) map[k] = i; });
-    return map;
-  }
-
   async function products(branch, o) {
     o = o || {};
     const args = [branch], where = ["branch_id = $1", "active"];
-    if (o.q) { args.push("%" + o.q.toLowerCase() + "%"); where.push("lower(name) LIKE $" + args.length); }
+    if (o.q) { args.push("%" + o.q.toLowerCase() + "%"); where.push("(lower(name) LIKE $" + args.length + " OR lower(coalesce(brand,'')) LIKE $" + args.length + ")"); }
+    if (o.category === "none") where.push("category IS NULL");
+    else if (o.category) { args.push(o.category); where.push("category = $" + args.length); }
     const limit = Math.min(500, parseInt(o.limit, 10) || 200);
     const r = await pool().query(`SELECT * FROM proof_products WHERE ${where.join(" AND ")} ORDER BY lower(name) LIMIT ${limit}`, args);
     // Camel-case the boundary -- a leaked raw column name (item_no) is how a
     // client ends up reading undefined (the lesson the shipped merch code
     // left a comment about).
-    return { products: r.rows.map((p) => ({ id: p.id, name: p.name, brand: p.brand, pack: p.pack, itemNo: p.item_no })) };
+    return { products: r.rows.map((p) => ({ id: p.id, name: p.name, brand: p.brand, pack: p.pack, itemNo: p.item_no, category: p.category || null })) };
   }
 
   async function productSave(branch, o) {
     const pid = deriveProductId(o);
+    const cat = o.category === undefined ? undefined : validCategory(o.category);
+    if (cat === undefined && o.category !== undefined) return { error: "Unknown category" };
     await pool().query(
-      "INSERT INTO proof_products (branch_id, id, item_no, name, brand, pack) VALUES ($1,$2,$3,$4,$5,$6) " +
-      "ON CONFLICT (branch_id, id) DO UPDATE SET item_no=EXCLUDED.item_no, name=EXCLUDED.name, brand=EXCLUDED.brand, pack=EXCLUDED.pack, active=true",
-      [branch, pid, o.itemNo || null, clip(o.name, 120), o.brand ? clip(o.brand, 60) : null, o.pack ? clip(o.pack, 40) : null]
+      "INSERT INTO proof_products (branch_id, id, item_no, name, brand, pack, category) VALUES ($1,$2,$3,$4,$5,$6,$7) " +
+      "ON CONFLICT (branch_id, id) DO UPDATE SET item_no=EXCLUDED.item_no, name=EXCLUDED.name, brand=EXCLUDED.brand, pack=EXCLUDED.pack, " +
+      "  category=COALESCE(EXCLUDED.category, proof_products.category), active=true",
+      [branch, pid, o.itemNo || null, clip(o.name, 120), o.brand ? clip(o.brand, 60) : null, o.pack ? clip(o.pack, 40) : null, cat || null]
     );
     return { ok: true, id: pid };
+  }
+
+  /* Set the category on many products at once -- the realistic way a catalog
+     gets categorised, since no export arrives with our own beer/NA split. */
+  async function productsSetCategory(branch, ids, category) {
+    const cat = validCategory(category);
+    if (cat === undefined) return { error: "Unknown category" };
+    if (!Array.isArray(ids) || !ids.length) return { error: "Nothing selected" };
+    const r = await pool().query("UPDATE proof_products SET category=$3 WHERE branch_id=$1 AND id = ANY($2)", [branch, ids, cat]);
+    return { ok: true, updated: r.rowCount || 0, category: cat };
   }
 
   async function productRemove(branch, id) {
@@ -583,7 +611,7 @@ function create(deps) {
     const hasHeader = looksLikeHeader(rows[0]);
     const map = hasHeader ? prodColMap(rows[0]) : {};
     const body = hasHeader ? rows.slice(1) : rows;
-    let saved = 0, skipped = 0;
+    let saved = 0, skipped = 0, categorised = 0;
     const keep = [];
     for (const r of body) {
       let name, itemNo;
@@ -599,7 +627,9 @@ function create(deps) {
       if (!name) { skipped++; continue; }
       const brand = map.brand != null ? clip(r[map.brand], 60) : null;
       const pack = map.pack != null ? clip(r[map.pack], 40) : null;
-      keep.push([branch, deriveProductId({ name, itemNo: itemNo || null }), itemNo || null, name, brand, pack, true]);
+      const cat = map.category != null ? normCategory(r[map.category]) : null;
+      if (cat) categorised++;
+      keep.push([branch, deriveProductId({ name, itemNo: itemNo || null }), itemNo || null, name, brand, pack, cat, true]);
       saved++;
     }
     if (o.apply === false) return { ok: true, saved, skipped, headerSeen: hasHeader };
@@ -607,11 +637,11 @@ function create(deps) {
     // thousands of rows and row-at-a-time times the request out.
     const up = await D.batchUpsert(pool(), {
       table: "proof_products",
-      columns: ["branch_id", "id", "item_no", "name", "brand", "pack", "active"],
+      columns: ["branch_id", "id", "item_no", "name", "brand", "pack", "category", "active"],
       conflict: ["branch_id", "id"],
       rows: keep,
     });
-    return { ok: true, saved: up.written, skipped, duplicates: up.collapsed, headerSeen: hasHeader };
+    return { ok: true, saved: up.written, skipped, duplicates: up.collapsed, categorised, headerSeen: hasHeader };
   }
 
   async function sections(branch, storeId) {
@@ -632,9 +662,9 @@ function create(deps) {
 
   // The merchandiser's actual checklist for a store, grouped by aisle --
   // same shape the shipped merch screen renders from.
-  async function planItems(branch, storeId) {
+  async function planItems(branch, storeId, category) {
     const r = await pool().query(
-      "SELECT pi.id, pi.aisle, pi.bay, pi.shelf, pi.note, pi.section_id, s.label AS section_label, pr.id AS product_id, pr.name, pr.item_no, pr.brand " +
+      "SELECT pi.id, pi.aisle, pi.bay, pi.shelf, pi.note, pi.section_id, s.label AS section_label, pr.id AS product_id, pr.name, pr.item_no, pr.brand, pr.category " +
       "FROM proof_plan_items pi JOIN proof_products pr ON pr.branch_id=pi.branch_id AND pr.id=pi.product_id " +
       "LEFT JOIN proof_sections s ON s.id = pi.section_id " +
       "WHERE pi.branch_id=$1 AND pi.store_id=$2 AND pi.active " +
@@ -643,18 +673,24 @@ function create(deps) {
     ).catch(() =>
       // Fallback if an aisle has no numeric prefix at all and the cast throws.
       pool().query(
-        "SELECT pi.id, pi.aisle, pi.bay, pi.shelf, pi.note, pi.section_id, s.label AS section_label, pr.id AS product_id, pr.name, pr.item_no, pr.brand " +
+        "SELECT pi.id, pi.aisle, pi.bay, pi.shelf, pi.note, pi.section_id, s.label AS section_label, pr.id AS product_id, pr.name, pr.item_no, pr.brand, pr.category " +
         "FROM proof_plan_items pi JOIN proof_products pr ON pr.branch_id=pi.branch_id AND pr.id=pi.product_id " +
         "LEFT JOIN proof_sections s ON s.id = pi.section_id " +
         "WHERE pi.branch_id=$1 AND pi.store_id=$2 AND pi.active ORDER BY pi.aisle, pi.seq", [branch, storeId]
       )
     );
+    // Which categories this store's plan actually covers -- the Start Visit
+    // prompt is built from this, so a store whose plan is all one thing never
+    // asks a pointless question.
+    const cats = [...new Set(r.rows.map((x) => x.category).filter(Boolean))];
+    const rows = category ? r.rows.filter((x) => x.category === category) : r.rows;
     const groups = {};
-    r.rows.forEach((x) => {
+    rows.forEach((x) => {
       const key = x.aisle || "—";
-      (groups[key] = groups[key] || []).push({ id: x.id, productId: x.product_id, name: x.name, itemNo: x.item_no, brand: x.brand, bay: x.bay, shelf: x.shelf, note: x.note, sectionId: x.section_id, sectionLabel: x.section_label });
+      (groups[key] = groups[key] || []).push({ id: x.id, productId: x.product_id, name: x.name, itemNo: x.item_no, brand: x.brand, category: x.category || null, bay: x.bay, shelf: x.shelf, note: x.note, sectionId: x.section_id, sectionLabel: x.section_label });
     });
-    return { storeId, count: r.rows.length, groups: Object.keys(groups).map((aisle) => ({ aisle, items: groups[aisle] })) };
+    return { storeId, count: rows.length, total: r.rows.length, categories: cats, uncategorised: r.rows.filter((x) => !x.category).length,
+             groups: Object.keys(groups).map((aisle) => ({ aisle, items: groups[aisle] })) };
   }
 
   async function planItemSet(branch, o) {
@@ -695,11 +731,13 @@ function create(deps) {
     if (open) return { open: true, visit: _visitOut(open) };
     let row;
     try {
+      const cat = validCategory(o.category);
+      if (cat === undefined) return { error: "Unknown category" };
       const r = await pool().query(
-        "INSERT INTO proof_visits (branch_id, merch_id, store_id, block_id, lat, lng, accuracy_m, geo_denied, device_id) " +
-        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
+        "INSERT INTO proof_visits (branch_id, merch_id, store_id, block_id, lat, lng, accuracy_m, geo_denied, device_id, category) " +
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
         [session.branch, session.id, o.storeId, o.blockId || null, o.lat != null ? o.lat : null, o.lng != null ? o.lng : null,
-         o.accuracy != null ? o.accuracy : null, !!o.geoDenied, o.deviceId || null]
+         o.accuracy != null ? o.accuracy : null, !!o.geoDenied, o.deviceId || null, cat]
       );
       row = r.rows[0];
     } catch (e) {
@@ -715,7 +753,8 @@ function create(deps) {
 
   function _visitOut(r) {
     return { id: r.id, storeId: r.store_id, blockId: r.block_id, startedAt: r.started_at, endedAt: r.ended_at,
-      effectiveEndAt: r.effective_end_at, closeReason: r.close_reason, geoFlag: r.geo_flag, geoDenied: r.geo_denied };
+      effectiveEndAt: r.effective_end_at, closeReason: r.close_reason, geoFlag: r.geo_flag, geoDenied: r.geo_denied,
+      category: r.category || null, categoryLabel: categoryLabel(r.category) };
   }
 
   // One open section at a time, enforced here rather than only in the UI so a
@@ -887,6 +926,89 @@ function create(deps) {
     };
   }
 
+  /* ---- Effort reporting -------------------------------------------------
+     Two questions Jess needs answered to price merchandising: how much time
+     goes to beer versus non-alc, and which brands cost the most effort.
+
+     Category time is MEASURED: a visit carries the category the merchandiser
+     picked, so its whole duration belongs to that category.
+
+     Brand time is ESTIMATED from the gap between consecutive item marks. Each
+     gap is capped at GAP_CAP_SECONDS before it is summed or averaged -- one
+     merchandiser taking a phone call mid-aisle would otherwise land forty
+     minutes on whatever brand they marked next and quietly ruin the number.
+     The count of capped gaps comes back so the cap is never invisible. */
+  const GAP_CAP_SECONDS = 600;
+
+  async function reportCategories(branch, o) {
+    o = o || {};
+    const args = [branch], where = ["v.branch_id = $1"];
+    if (!o.includeAutoClosed) where.push("v.close_reason = 'manual'"); else where.push("v.ended_at IS NOT NULL");
+    if (o.from) { args.push(o.from); where.push("v.started_at >= $" + args.length); }
+    if (o.to) { args.push(o.to); where.push("v.started_at <= $" + args.length); }
+    const r = await pool().query(
+      `WITH vs AS (
+         SELECT v.id, v.category, v.merch_id,
+                EXTRACT(EPOCH FROM (COALESCE(v.effective_end_at, v.ended_at) - v.started_at)) AS secs
+         FROM proof_visits v WHERE ${where.join(" AND ")}
+       )
+       SELECT COALESCE(vs.category, '') AS category,
+              COUNT(*) AS visits,
+              COUNT(DISTINCT vs.merch_id) AS people,
+              SUM(vs.secs) AS secs,
+              AVG(vs.secs) AS avg_secs,
+              (SELECT COUNT(*) FROM proof_item_results r WHERE r.visit_id IN (SELECT id FROM vs v2 WHERE COALESCE(v2.category,'') = COALESCE(vs.category,''))) AS items,
+              (SELECT COUNT(*) FROM proof_photos p WHERE p.visit_id IN (SELECT id FROM vs v2 WHERE COALESCE(v2.category,'') = COALESCE(vs.category,''))) AS photos
+       FROM vs GROUP BY 1 ORDER BY secs DESC NULLS LAST`, args);
+    const rows = r.rows.map((x) => ({
+      category: x.category || null, label: categoryLabel(x.category || null),
+      visits: Number(x.visits), people: Number(x.people), items: Number(x.items), photos: Number(x.photos),
+      minutes: x.secs == null ? null : Math.round(Number(x.secs) / 60),
+      avgMinutes: x.avg_secs == null ? null : Math.round(Number(x.avg_secs) / 60),
+    }));
+    const total = rows.reduce((n, x) => n + (x.minutes || 0), 0);
+    return { rows: rows.map((x) => Object.assign(x, { sharePct: total ? Math.round((x.minutes || 0) * 100 / total) : null })), totalMinutes: total };
+  }
+
+  async function reportBrands(branch, o) {
+    o = o || {};
+    const args = [branch], where = ["v.branch_id = $1"];
+    if (!o.includeAutoClosed) where.push("v.close_reason = 'manual'"); else where.push("v.ended_at IS NOT NULL");
+    if (o.from) { args.push(o.from); where.push("v.started_at >= $" + args.length); }
+    if (o.to) { args.push(o.to); where.push("v.started_at <= $" + args.length); }
+    if (o.category) { args.push(o.category); where.push("v.category = $" + args.length); }
+    args.push(GAP_CAP_SECONDS);
+    const capArg = "$" + args.length;
+    const r = await pool().query(
+      `WITH acts AS (
+         SELECT r.id, r.visit_id, r.created_at, pr.brand, pr.category,
+                COALESCE(LAG(r.created_at) OVER (PARTITION BY r.visit_id ORDER BY r.created_at, r.id), v.started_at) AS prev
+         FROM proof_item_results r
+         JOIN proof_visits v ON v.id = r.visit_id
+         LEFT JOIN proof_plan_items pi ON pi.id = r.plan_item_id
+         LEFT JOIN proof_products pr ON pr.branch_id = pi.branch_id AND pr.id = pi.product_id
+         WHERE ${where.join(" AND ")}
+       ), gaps AS (
+         SELECT brand, category,
+                LEAST(GREATEST(EXTRACT(EPOCH FROM (created_at - prev)), 0), ${capArg}) AS secs,
+                (EXTRACT(EPOCH FROM (created_at - prev)) > ${capArg}) AS capped
+         FROM acts
+       )
+       SELECT COALESCE(brand, '') AS brand, COALESCE(category, '') AS category,
+              COUNT(*) AS items,
+              SUM(secs) AS secs,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY secs) AS median_secs,
+              SUM(CASE WHEN capped THEN 1 ELSE 0 END) AS capped
+       FROM gaps GROUP BY 1, 2 ORDER BY secs DESC NULLS LAST LIMIT 200`, args);
+    const rows = r.rows.map((x) => ({
+      brand: x.brand || "(no brand)", category: x.category || null, categoryLabel: categoryLabel(x.category || null),
+      items: Number(x.items), minutes: Math.round(Number(x.secs || 0) / 60),
+      medianSeconds: x.median_secs == null ? null : Math.round(Number(x.median_secs)),
+      capped: Number(x.capped),
+    }));
+    return { rows, capSeconds: GAP_CAP_SECONDS, cappedTotal: rows.reduce((n, x) => n + x.capped, 0) };
+  }
+
   /* The image itself. Kept OUT of visitDetail so a visit with twenty photos
      is a small JSON payload and the browser fetches each picture lazily and
      caches it. A merchandiser may fetch their own; a manager, any in their
@@ -954,10 +1076,11 @@ function create(deps) {
     stores, uploadStores, storeDetail,
     teams, teamSave, teamRemove, week, blockAdd, blockUpdate, blockRemove,
     blockStoreAdd, blockStoreRemove, blockStoreFlags, blockMemberAdd, blockMemberRemove, myDay,
-    products, productSave, productRemove, productsUpload,
+    products, productSave, productRemove, productsUpload, productsSetCategory,
     sections, sectionSave, sectionRemove, planItems, planItemSet, planItemRemove, planItemsCopy,
     openVisitFor, startVisit, sectionEnter, sectionExit, itemResult, addPhoto, closeForgotten, endVisit,
     blockedOpenVisit, nightlySweepOpenVisits, visitDetail, photo, myVisits, liveCompletion, reporting,
+    reportCategories, reportBrands,
     awardPoints, leaderboard,
     _today, _dateAdd, _weekday, TRUCK_START, DEFAULT_START,
   };
@@ -967,5 +1090,6 @@ module.exports = {
   create, ...ROLES,
   // Pure functions, exported for test-proof.js -- no DB, no network.
   resolveBlockStart, deriveProductId, dayBlocksFor, sectionSpans, colMap, prodColMap, looksLikeHeader, slug,
+  PRODUCT_CATEGORIES, categoryLabel, validCategory, normCategory,
   TRUCK_START, DEFAULT_START,
 };
