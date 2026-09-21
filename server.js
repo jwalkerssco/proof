@@ -67,7 +67,7 @@ const wrap = (fn) => async (req, res) => {
   try { const out = await fn(req); if (out && out.error) return res.status(out.pending ? 200 : 400).json(out); res.json(out); }
   catch (e) { console.error("[proof]", req.method, req.path, e && e.message); res.status(503).json({ error: "unavailable" }); }
 };
-const MARKER = "proof-0.2.3";
+const MARKER = "proof-0.3.0";
 
 app.get("/api/health", (req, res) => res.json({ ok: true, ready, marker: MARKER, node: process.version, at: new Date().toISOString() }));
 app.get("/api/migrations", requireRole("proofadmin"), wrap(() => DB.listMigrations()));
@@ -161,6 +161,17 @@ app.post("/api/visits/:id/photo", requireRole("proof", "proofadmin"), wrap((req)
 app.post("/api/visits/:id/forgotten", requireRole("proof", "proofadmin"), wrap((req) => PROOF.closeForgotten(Number(req.params.id))));
 app.post("/api/visits/:id/end", requireRole("proof", "proofadmin"), wrap((req) => PROOF.endVisit(req.session, Number(req.params.id), (req.body || {}).atClient)));
 app.get("/api/visits/:id", requireRole("proof", "proofadmin"), wrap((req) => PROOF.visitDetail(Number(req.params.id))));
+/* The image bytes, kept out of the visit JSON so a twenty-photo visit is a
+   small payload and the browser fetches each picture lazily. Private -- it is
+   behind a session -- but immutable, so a manager scrolling a visit does not
+   refetch the same JPEG. */
+app.get("/api/photos/:id", requireRole("proof", "proofadmin"), async (req, res) => {
+  try {
+    const out = await PROOF.photo(req.session, Number(req.params.id));
+    if (out.error) return res.status(out.error === "forbidden" ? 403 : 404).json(out);
+    res.set("Content-Type", out.mime).set("Cache-Control", "private, max-age=86400").send(out.buffer);
+  } catch (e) { console.error("[proof] photo", e && e.message); res.status(503).json({ error: "unavailable" }); }
+});
 
 /* ---- admin views, points ---- */
 app.get("/api/admin/live", requireRole("proofadmin"), wrap((req) => PROOF.liveCompletion(req.session.branch, req.query.date)));

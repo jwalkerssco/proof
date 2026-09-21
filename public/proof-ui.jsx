@@ -1038,10 +1038,132 @@ function DevicesPanel({ ui, notify }) {
   </div>;
 }
 
+/* ---- One visit, as a manager sees it: how long, what they marked, the
+   photos. Opened from Live (and later from Reporting). ---- */
+function secs(n) {
+  if (n == null) return "—";
+  if (n < 90) return n + "s";
+  const m = Math.round(n / 60);
+  return m < 60 ? m + " min" : Math.floor(m / 60) + "h " + (m % 60) + "m";
+}
+const STATUS_TONE = { stocked: "green", fixed: "green", out_of_stock: "red", not_carried: "gray" };
+const STATUS_LABEL = { stocked: "Stocked", fixed: "Fixed", out_of_stock: "Out of stock", not_carried: "Not carried" };
+
+function VisitDetail({ ui, visitId, onClose }) {
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState("");
+  const [zoom, setZoom] = useState(null);
+  useEffect(() => {
+    jget(ui, "/api/visits/" + visitId).then((r) => { if (r && r.error) setErr(r.error); else setD(r); });
+  }, [visitId]);
+
+  const v = d && d.visit;
+  const byBrand = useMemo(() => {
+    if (!d) return [];
+    const m = {};
+    d.items.forEach((it) => {
+      const k = it.brand || "(no brand)";
+      (m[k] = m[k] || { brand: k, items: 0, seconds: 0 }).items++;
+      m[k].seconds += it.estSeconds || 0;
+    });
+    return Object.values(m).sort((a, b) => b.seconds - a.seconds);
+  }, [d]);
+
+  return <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(14,31,60,0.5)", zIndex: 60, display: "flex", justifyContent: "flex-end" }}>
+    <div onClick={(e) => e.stopPropagation()} style={{ background: T.panel, width: "min(760px, 100%)", height: "100%", overflowY: "auto", boxShadow: "-8px 0 30px rgba(0,0,0,0.2)" }}>
+      <div style={{ background: T.navy, padding: "16px 20px", display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, zIndex: 2 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: ui.HEAD, fontWeight: 700, fontSize: 18, color: "#fff" }}>{v ? v.storeName : "Visit"}</div>
+          {v && <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 12.5 }}>{v.merchName} · {fmtTime(v.startedAt)}{v.endedAt ? " – " + fmtTime(v.endedAt) : ""}</div>}
+        </div>
+        <button onClick={onClose} style={{ background: "rgba(255,255,255,0.14)", border: "none", color: "#fff", borderRadius: 8, padding: "7px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Close</button>
+      </div>
+      <div style={{ padding: 18 }}>
+        {err && <Card accent={T.red}><div style={{ color: T.red, fontSize: 13.5 }}>{err}</div></Card>}
+        {!d && !err && <div style={{ color: T.mute, padding: 20 }}>Loading…</div>}
+        {d && <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 14 }}>
+            {[[v.minutes == null ? "—" : v.minutes + " min", "in store"], [d.items.length, "items marked"], [d.photos.length, "photos"], [v.closeReason === "manual" ? "Finished" : v.endedAt ? "Auto-closed" : "Open", "status"]].map(([a, b]) => (
+              <Card key={b} pad={12} style={{ marginBottom: 0 }}>
+                <div style={{ fontFamily: ui.HEAD, fontWeight: 800, fontSize: 19, color: T.ink }}>{a}</div>
+                <div style={{ fontSize: 11.5, color: T.sub }}>{b}</div>
+              </Card>
+            ))}
+          </div>
+          {v.closeReason && v.closeReason !== "manual" && <Card accent={T.amber} style={{ background: T.amberSoft, borderColor: "#F1DDA6" }}>
+            <div style={{ fontSize: 13, color: T.ink }}>This visit was closed {v.closeReason === "forgotten" ? "by the merchandiser from somewhere else" : "automatically overnight"}, so its length is a known unknown and it's left out of reporting averages by default.</div>
+          </Card>}
+
+          <Card>
+            <H2 ui={ui} style={{ marginBottom: 8 }}>Photos</H2>
+            {!d.photos.length && <div style={{ fontSize: 13, color: T.mute }}>No photos on this visit.</div>}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 }}>
+              {d.photos.map((p) => (
+                <button key={p.id} onClick={() => setZoom(p)} style={{ padding: 0, border: `1px solid ${T.line}`, borderRadius: 10, overflow: "hidden", background: "#fff", cursor: "zoom-in" }}>
+                  <img src={"/api/photos/" + p.id} alt="" loading="lazy" style={{ display: "block", width: "100%", height: 130, objectFit: "cover" }} />
+                  <div style={{ fontSize: 11, color: T.sub, padding: "5px 7px", textAlign: "left" }}>{p.section || "—"} · {fmtTime(p.takenAt)}</div>
+                </button>
+              ))}
+            </div>
+          </Card>
+
+          {d.sections.length > 0 && <Card>
+            <H2 ui={ui} style={{ marginBottom: 8 }}>Time by section</H2>
+            {d.sections.map((s) => (
+              <div key={String(s.sectionId)} style={{ display: "flex", gap: 10, padding: "7px 2px", borderTop: `1px solid ${T.line}`, fontSize: 13.5 }}>
+                <div style={{ flex: 1, fontWeight: 600, color: T.ink }}>{s.label || "(section removed)"}</div>
+                {s.visits > 1 && <span style={{ color: T.mute, fontSize: 12 }}>{s.visits} passes</span>}
+                <div style={{ fontWeight: 700 }}>{secs(s.seconds)}</div>
+              </div>
+            ))}
+          </Card>}
+
+          <Card>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
+              <H2 ui={ui}>What was marked</H2>
+              <span style={{ fontSize: 12, color: T.mute }}>{d.items.length} item{d.items.length === 1 ? "" : "s"}</span>
+            </div>
+            {!d.items.length && <div style={{ fontSize: 13, color: T.mute }}>Nothing was marked on this visit.</div>}
+            {d.items.map((it) => (
+              <div key={it.id} style={{ display: "grid", gridTemplateColumns: "1fr 120px 90px 70px", gap: 10, alignItems: "center", padding: "8px 2px", borderTop: `1px solid ${T.line}`, fontSize: 13 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, color: T.ink }}>{it.product}{it.itemNo ? <span style={{ color: T.mute, fontWeight: 500 }}> #{it.itemNo}</span> : null}</div>
+                  <div style={{ fontSize: 11.5, color: T.sub }}>{[it.section, it.where].filter(Boolean).join(" · ")}{it.note ? " · " + it.note : ""}</div>
+                </div>
+                <div style={{ color: T.sub, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.brand}</div>
+                <Badge tone={STATUS_TONE[it.status] || "gray"}>{STATUS_LABEL[it.status] || it.status}</Badge>
+                <div style={{ textAlign: "right", color: T.sub, fontSize: 12.5 }}>{secs(it.estSeconds)}</div>
+              </div>
+            ))}
+            {d.items.length > 0 && <div style={{ fontSize: 11.5, color: T.mute, marginTop: 8, lineHeight: 1.5 }}>
+              The time column is the gap since the previous action — an <b>estimate</b>, not a stopwatch. The first item includes walking to the shelf, and a photo lands inside the gap. Useful as a median across many visits, not row by row.
+            </div>}
+          </Card>
+
+          {byBrand.length > 0 && <Card>
+            <H2 ui={ui} style={{ marginBottom: 8 }}>Estimated time by brand</H2>
+            {byBrand.map((b) => (
+              <div key={b.brand} style={{ display: "flex", gap: 10, padding: "6px 2px", borderTop: `1px solid ${T.line}`, fontSize: 13.5 }}>
+                <div style={{ flex: 1, fontWeight: 600, color: T.ink }}>{b.brand}</div>
+                <div style={{ color: T.sub, fontSize: 12.5 }}>{b.items} item{b.items === 1 ? "" : "s"}</div>
+                <div style={{ fontWeight: 700, width: 70, textAlign: "right" }}>{secs(b.seconds)}</div>
+              </div>
+            ))}
+          </Card>}
+        </>}
+      </div>
+    </div>
+    {zoom && <div onClick={(e) => { e.stopPropagation(); setZoom(null); }} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 70, display: "grid", placeItems: "center", cursor: "zoom-out" }}>
+      <img src={"/api/photos/" + zoom.id} alt="" style={{ maxWidth: "94vw", maxHeight: "94vh", objectFit: "contain" }} />
+    </div>}
+  </div>;
+}
+
 /* ---- Live ---- */
 function LivePanel({ ui }) {
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [live, setLive] = useState(null);
+  const [openVisit, setOpenVisit] = useState(null);
   useEffect(() => {
     let alive = true;
     const load = () => jget(ui, "/api/admin/live?date=" + date).then((r) => { if (alive) setLive(r); });
@@ -1058,7 +1180,8 @@ function LivePanel({ ui }) {
     <Card>
       {!live && <div style={{ color: T.mute }}>Loading…</div>}
       {live && !visits.length && <Empty ui={ui} icon="Clock" title="No visits yet" body="They'll appear here as merchandisers press Start Visit." />}
-      {visits.map((v) => <div key={v.id} style={{ display: "grid", gridTemplateColumns: "14px 1fr 1fr 180px 120px", gap: 12, alignItems: "center", padding: "10px 4px", borderTop: `1px solid ${T.line}`, fontSize: 13.5 }}>
+      {visits.map((v) => <div key={v.id} onClick={() => setOpenVisit(v.id)} title="Open this visit"
+        style={{ display: "grid", gridTemplateColumns: "14px 1fr 1fr 180px 120px 16px", gap: 12, alignItems: "center", padding: "10px 4px", borderTop: `1px solid ${T.line}`, fontSize: 13.5, cursor: "pointer" }}>
         <span style={{ width: 10, height: 10, borderRadius: 999, background: v.inProgress ? T.amber : v.closeReason === "manual" ? T.green : T.mute }} />
         <div style={{ fontWeight: 700, color: T.ink }}>{v.merchName}</div>
         <div style={{ color: T.ink }}>{v.storeName || v.storeId}</div>
@@ -1067,8 +1190,10 @@ function LivePanel({ ui }) {
           {v.inProgress ? <Badge tone="amber">In progress</Badge> : v.closeReason === "manual" ? <Badge tone="green">Finished</Badge> : <Badge>Auto-closed</Badge>}
           {v.geoFlag && <span title="Location didn't match the store"><Icon ui={ui} name="AlertTriangle" size={14} color={T.red} /></span>}
         </div>
+        <Icon ui={ui} name="ChevronRight" size={15} color={T.mute} />
       </div>)}
     </Card>
+    {openVisit && <VisitDetail ui={ui} visitId={openVisit} onClose={() => setOpenVisit(null)} />}
   </div>;
 }
 
@@ -1110,4 +1235,4 @@ function App({ ui, boot, role, onLogout, onRefresh }) {
   return role === "proofadmin" ? <AdminApp ui={ui} boot={boot} onLogout={onLogout} /> : <MerchApp ui={ui} boot={boot} onLogout={onLogout} onRefresh={onRefresh} />;
 }
 
-export { App, MerchApp, TodayList, LeaderboardScreen, StoreFlow, DoneScreen, AdminApp, ScheduleBoard, BlockStores, StoresPanel, CatalogPanel, TeamPanel, DevicesPanel, LivePanel, ReportingPanel, Sheet, Chip };
+export { App, MerchApp, TodayList, LeaderboardScreen, StoreFlow, DoneScreen, AdminApp, ScheduleBoard, BlockStores, StoresPanel, CatalogPanel, TeamPanel, DevicesPanel, LivePanel, ReportingPanel, VisitDetail, FileDrop, Sheet, Chip };

@@ -64,6 +64,37 @@ function resolveBlockStart(current, patch) {
 // so renaming a product doesn't orphan its plan-item rows (the 029 lesson).
 function deriveProductId(o) { return o.id || (o.itemNo ? "no-" + slug(o.itemNo) : slug(o.name)); }
 
+/* Pure -- fold section_enter/section_exit events into one span per section.
+   An enter with no matching exit (the visit ended inside the section) is
+   closed by the next event of any kind, and failing that left open with
+   seconds null rather than guessed: a fabricated duration is worse than an
+   absent one on a screen someone is judging effort from. */
+function sectionSpans(events) {
+  const rows = (events || []).slice().sort((a, b) => (a.seq - b.seq) || 0);
+  const out = [];
+  let open = null;
+  for (const e of rows) {
+    const at = new Date(e.at_server || e.at_client || 0).getTime();
+    if (e.kind === "section_enter") {
+      if (open) { open.endedAt = at; open.seconds = Math.max(0, Math.round((at - open.startedAt) / 1000)); out.push(open); }
+      open = { sectionId: e.section_id, label: e.section_label || "", startedAt: at, endedAt: null, seconds: null };
+    } else if (open && (e.kind === "section_exit" || e.kind === "visit_end")) {
+      open.endedAt = at; open.seconds = Math.max(0, Math.round((at - open.startedAt) / 1000));
+      out.push(open); open = null;
+    }
+  }
+  if (open) out.push(open);
+  // Merge repeat visits to the same section into one row.
+  const byId = new Map();
+  for (const s of out) {
+    const k = String(s.sectionId);
+    const cur = byId.get(k);
+    if (cur) { cur.seconds = (cur.seconds || 0) + (s.seconds || 0); cur.visits++; }
+    else byId.set(k, { sectionId: s.sectionId, label: s.label, seconds: s.seconds, visits: 1 });
+  }
+  return [...byId.values()];
+}
+
 // Pure -- a merchandiser's day is every block where either their team is
 // assigned OR they were added individually (the "move people around" door).
 function dayBlocksFor(dayBlocks, teamId, personId) {
@@ -787,15 +818,91 @@ function create(deps) {
     return { closed: r.rows.length };
   }
 
+  /* Everything a manager needs to judge one visit: who, where, how long,
+     what they marked, and the photos. Item results carry the product and
+     brand joined in -- a plan_item_id on a screen is useless.
+
+     The per-item seconds are the gap to the PREVIOUS recorded action, which
+     is the closest thing to "how long did this item take" that exists
+     without asking a merchandiser to start and stop a clock per item. It is
+     an estimate and is labelled one everywhere it surfaces: the first item
+     after arriving includes walking to the shelf, and a photo or an
+     interruption lands inside the gap. Over many visits the median is a
+     useful effort signal; a single row is not. */
   async function visitDetail(id) {
     const [v, events, results, photos] = await Promise.all([
-      pool().query("SELECT * FROM proof_visits WHERE id=$1", [id]),
-      pool().query("SELECT kind, section_id, at_client, at_server, seq FROM proof_visit_events WHERE visit_id=$1 ORDER BY seq", [id]),
-      pool().query("SELECT plan_item_id, status, note, created_at FROM proof_item_results WHERE visit_id=$1", [id]),
-      pool().query("SELECT id, section_id, mime, byte_len, taken_at FROM proof_photos WHERE visit_id=$1 ORDER BY taken_at", [id]),
+      pool().query(
+        "SELECT v.*, p.name AS merch_name, s.name AS store_name, s.chain, s.addr, s.city " +
+        "FROM proof_visits v LEFT JOIN proof_people p ON p.id = v.merch_id " +
+        "LEFT JOIN proof_stores s ON s.branch_id = v.branch_id AND s.id = v.store_id WHERE v.id=$1", [id]),
+      pool().query(
+        "SELECT e.kind, e.section_id, e.at_client, e.at_server, e.seq, sec.label AS section_label " +
+        "FROM proof_visit_events e LEFT JOIN proof_sections sec ON sec.id = e.section_id " +
+        "WHERE e.visit_id=$1 ORDER BY e.seq, e.id", [id]),
+      pool().query(
+        "SELECT r.id, r.plan_item_id, r.status, r.note, r.created_at, " +
+        "       pr.name AS product_name, pr.brand, pr.item_no, " +
+        "       pi.aisle, pi.bay, pi.shelf, sec.label AS section_label " +
+        "FROM proof_item_results r " +
+        "LEFT JOIN proof_plan_items pi ON pi.id = r.plan_item_id " +
+        "LEFT JOIN proof_products pr ON pr.branch_id = pi.branch_id AND pr.id = pi.product_id " +
+        "LEFT JOIN proof_sections sec ON sec.id = pi.section_id " +
+        "WHERE r.visit_id=$1 ORDER BY r.created_at, r.id", [id]),
+      pool().query(
+        "SELECT ph.id, ph.section_id, ph.mime, ph.byte_len, ph.taken_at, sec.label AS section_label " +
+        "FROM proof_photos ph LEFT JOIN proof_sections sec ON sec.id = ph.section_id " +
+        "WHERE ph.visit_id=$1 ORDER BY ph.taken_at, ph.id", [id]),
     ]);
     if (!v.rows.length) return { error: "not found" };
-    return { visit: _visitOut(v.rows[0]), events: events.rows, results: results.rows, photos: photos.rows };
+    const row = v.rows[0];
+    const started = new Date(row.started_at);
+    const ended = row.effective_end_at ? new Date(row.effective_end_at) : (row.ended_at ? new Date(row.ended_at) : null);
+
+    // Per-item estimate: seconds since the previous action in the visit,
+    // floored at the visit start so the first item is measured from arrival.
+    let prev = started;
+    const items = results.rows.map((r) => {
+      const at = new Date(r.created_at);
+      const secs = Math.max(0, Math.round((at - prev) / 1000));
+      prev = at;
+      return {
+        id: r.id, planItemId: r.plan_item_id, status: r.status, note: r.note || "", at: r.created_at,
+        product: r.product_name || "(removed from the plan)", brand: r.brand || "", itemNo: r.item_no || "",
+        where: [r.aisle && "Aisle " + r.aisle, r.bay && "Bay " + r.bay, r.shelf && "Shelf " + r.shelf].filter(Boolean).join(" · "),
+        section: r.section_label || "", estSeconds: secs,
+      };
+    });
+
+    return {
+      visit: Object.assign(_visitOut(row), {
+        merchId: row.merch_id, merchName: row.merch_name || row.merch_id,
+        storeName: row.store_name || row.store_id, chain: row.chain || "", addr: [row.addr, row.city].filter(Boolean).join(", "),
+        lat: row.lat, lng: row.lng, accuracyM: row.accuracy_m,
+        minutes: ended ? Math.max(0, Math.round((ended - started) / 60000)) : null,
+      }),
+      sections: sectionSpans(events.rows),
+      items,
+      photos: photos.rows.map((p) => ({ id: p.id, sectionId: p.section_id, section: p.section_label || "", mime: p.mime, bytes: p.byte_len, takenAt: p.taken_at })),
+      events: events.rows,
+    };
+  }
+
+  /* The image itself. Kept OUT of visitDetail so a visit with twenty photos
+     is a small JSON payload and the browser fetches each picture lazily and
+     caches it. A merchandiser may fetch their own; a manager, any in their
+     branch. */
+  async function photo(session, photoId) {
+    const r = await pool().query(
+      "SELECT ph.bytes, ph.mime, v.merch_id, v.branch_id FROM proof_photos ph JOIN proof_visits v ON v.id = ph.visit_id WHERE ph.id=$1", [photoId]);
+    if (!r.rows.length) return { error: "not found" };
+    const row = r.rows[0];
+    const isAdmin = session.role === "proofadmin";
+    if (!isAdmin && String(row.merch_id) !== String(session.id)) return { error: "forbidden" };
+    if (isAdmin && String(row.branch_id) !== String(session.branch)) return { error: "forbidden" };
+    const s = String(row.bytes || "");
+    const comma = s.indexOf(",");
+    const b64 = comma === -1 ? s : s.slice(comma + 1);
+    return { buffer: Buffer.from(b64, "base64"), mime: row.mime || "image/jpeg" };
   }
 
   // Admin: today's visits across their merchandisers -- in progress and done.
@@ -850,7 +957,7 @@ function create(deps) {
     products, productSave, productRemove, productsUpload,
     sections, sectionSave, sectionRemove, planItems, planItemSet, planItemRemove, planItemsCopy,
     openVisitFor, startVisit, sectionEnter, sectionExit, itemResult, addPhoto, closeForgotten, endVisit,
-    blockedOpenVisit, nightlySweepOpenVisits, visitDetail, myVisits, liveCompletion, reporting,
+    blockedOpenVisit, nightlySweepOpenVisits, visitDetail, photo, myVisits, liveCompletion, reporting,
     awardPoints, leaderboard,
     _today, _dateAdd, _weekday, TRUCK_START, DEFAULT_START,
   };
@@ -859,6 +966,6 @@ function create(deps) {
 module.exports = {
   create, ...ROLES,
   // Pure functions, exported for test-proof.js -- no DB, no network.
-  resolveBlockStart, deriveProductId, dayBlocksFor, colMap, prodColMap, looksLikeHeader, slug,
+  resolveBlockStart, deriveProductId, dayBlocksFor, sectionSpans, colMap, prodColMap, looksLikeHeader, slug,
   TRUCK_START, DEFAULT_START,
 };
