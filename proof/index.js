@@ -853,9 +853,17 @@ function create(deps) {
     return { ok: true };
   }
 
-  async function addPhoto(visitId, sectionId, dataUrl, mime) {
-    const bytes = String(dataUrl || "");
-    await pool().query("INSERT INTO proof_photos (visit_id, section_id, mime, bytes, byte_len) VALUES ($1,$2,$3,$4,$5)", [visitId, sectionId || null, mime || null, bytes, bytes.length]);
+  /* A photo covers a brand where it sits (see 008). `brand` and `aisle` are
+     what the walk grouped by, so the manager sees "Liquid Death · Aisle 5"
+     rather than an anonymous picture. Both nullable: a store with no plan
+     still gets a plain photo of the work. */
+  async function addPhoto(visitId, o) {
+    o = o || {};
+    const bytes = String(o.dataUrl || "");
+    if (!bytes) return { error: "No photo" };
+    await pool().query(
+      "INSERT INTO proof_photos (visit_id, section_id, brand, aisle, mime, bytes, byte_len) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+      [visitId, o.sectionId || null, o.brand ? clip(o.brand, 60) : null, o.aisle ? clip(o.aisle, 40) : null, o.mime || null, bytes, bytes.length]);
     return { ok: true };
   }
 
@@ -954,9 +962,9 @@ function create(deps) {
         "LEFT JOIN proof_sections sec ON sec.id = pi.section_id " +
         "WHERE r.visit_id=$1 ORDER BY r.created_at, r.id", [id]),
       pool().query(
-        "SELECT ph.id, ph.section_id, ph.mime, ph.byte_len, ph.taken_at, sec.label AS section_label " +
+        "SELECT ph.id, ph.section_id, ph.brand, ph.aisle, ph.mime, ph.byte_len, ph.taken_at, sec.label AS section_label " +
         "FROM proof_photos ph LEFT JOIN proof_sections sec ON sec.id = ph.section_id " +
-        "WHERE ph.visit_id=$1 ORDER BY ph.taken_at, ph.id", [id]),
+        "WHERE ph.visit_id=$1 ORDER BY ph.brand NULLS LAST, ph.taken_at, ph.id", [id]),
     ]);
     if (!v.rows.length) return { error: "not found" };
     const row = v.rows[0];
@@ -987,7 +995,7 @@ function create(deps) {
       }),
       sections: sectionSpans(events.rows),
       items,
-      photos: photos.rows.map((p) => ({ id: p.id, sectionId: p.section_id, section: p.section_label || "", mime: p.mime, bytes: p.byte_len, takenAt: p.taken_at })),
+      photos: photos.rows.map((p) => ({ id: p.id, sectionId: p.section_id, section: p.section_label || "", brand: p.brand || "", aisle: p.aisle || "", mime: p.mime, bytes: p.byte_len, takenAt: p.taken_at })),
       events: events.rows,
     };
   }

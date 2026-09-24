@@ -41,6 +41,7 @@ DB.register("004_catalog", (pool) => SCHEMA.migrateCatalog(pool));
 DB.register("005_visits", (pool) => SCHEMA.migrateVisits(pool));
 DB.register("006_points", (pool) => SCHEMA.migratePoints(pool));
 DB.register("007_categories", (pool) => SCHEMA.migrateCategories(pool));
+DB.register("008_photo_brand", (pool) => SCHEMA.migratePhotoBrand(pool));
 
 (async () => {
   const url = String(process.env.DATABASE_URL || "");

@@ -346,6 +346,23 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
   const totalItems = groups.reduce((n, g) => n + g.items.length, 0);
   const CATS = [{ id: "beer", label: "Beer" }, { id: "na", label: "Non-alc" }];
   const planCats = CATS.filter((c) => ((detail && detail.plan && detail.plan.categories) || []).indexOf(c.id) !== -1);
+
+  /* Brands within one aisle, in the order the plan lists them. The KEY is
+     aisle + brand, so Liquid Death in the cooler and Liquid Death on the
+     energy shelf are two blocks wanting two photos, while a brand that sits
+     in one place is one block wanting one. */
+  function brandBlocks(g) {
+    const by = new Map();
+    (g.items || []).forEach((it) => {
+      const brand = (it.brand || "").trim() || it.name;
+      const key = "b|" + g.aisle + "|" + brand.toLowerCase();
+      if (!by.has(key)) by.set(key, { key, brand, sectionId: it.sectionId || null, items: [] });
+      by.get(key).items.push(it);
+    });
+    return [...by.values()];
+  }
+  const allBlocks = useMemo(() => groups.flatMap((g) => brandBlocks(g)), [detail]);
+  const shotBrands = allBlocks.filter((b) => (photoCounts.byGroup[b.key] || 0) > 0).length;
   const checked = Object.keys(statuses).length;
   const blockedElsewhere = openVisit && openVisit.visit && String(openVisit.visit.storeId) !== String(storeId);
 
@@ -359,7 +376,6 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
     setWorking(category || null);
     if (r.open) notify("Resumed your open visit");
   }
-  function groupKey(g) { return g.items[0] && g.items[0].sectionId != null ? "s" + g.items[0].sectionId : "a" + g.aisle; }
   function touchSection(g) {
     const sid = g.items[0] && g.items[0].sectionId;
     if (visit && sid != null) jpost(ui, "/api/visits/" + visit.id + "/section-enter", { sectionId: sid, atClient: new Date().toISOString() }).catch(() => {});
@@ -371,20 +387,20 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
     const r = await jpost(ui, "/api/visits/" + visit.id + "/item-result", { planItemId: item.id, status }).catch(() => null);
     if (!r || r.error) notify("Couldn't save that — check your connection", "error");
   }
-  function takePhoto(g) { pendingGroup.current = g; fileRef.current && fileRef.current.click(); }
+  // target = { aisle, brand, sectionId } -- the brand block the camera sits on.
+  function takePhoto(target) { pendingGroup.current = target; fileRef.current && fileRef.current.click(); }
   async function onFile(e) {
     const f = e.target.files && e.target.files[0];
     e.target.value = "";
-    const g = pendingGroup.current;
-    if (!f || !visit || !g) return;
+    const t = pendingGroup.current;
+    if (!f || !visit || !t) return;
     try {
       const { dataUrl, mime } = await compressPhoto(f, 1200, 0.75);
-      touchSection(g);
-      const sid = g.items[0] && g.items[0].sectionId;
-      const r = await jpost(ui, "/api/visits/" + visit.id + "/photo", { sectionId: sid != null ? sid : null, dataUrl, mime });
+      if (t.sectionId != null) jpost(ui, "/api/visits/" + visit.id + "/section-enter", { sectionId: t.sectionId, atClient: new Date().toISOString() }).catch(() => {});
+      const r = await jpost(ui, "/api/visits/" + visit.id + "/photo", { sectionId: t.sectionId != null ? t.sectionId : null, brand: t.brand || null, aisle: t.aisle || null, dataUrl, mime });
       if (!r || r.error) throw new Error("save failed");
-      const k = groupKey(g);
-      setThumbs((t) => Object.assign({}, t, { [k]: [...(t[k] || []), dataUrl] }));
+      const k = t.brand ? "b|" + t.aisle + "|" + String(t.brand).toLowerCase() : "loose";
+      setThumbs((th) => Object.assign({}, th, { [k]: [...(th[k] || []), dataUrl] }));
       setPhotoCounts((c) => ({ total: c.total + 1, byGroup: Object.assign({}, c.byGroup, { [k]: (c.byGroup[k] || 0) + 1 }) }));
       notify("Photo saved");
     } catch (e) { notify("Couldn't save the photo — try again", "error"); }
@@ -452,33 +468,46 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
       <div style={{ flex: 1 }}>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: T.sub, marginBottom: 5 }}>
           <span><b style={{ color: T.ink }}>{checked}</b> of {totalItems} checked</span>
-          <span><b style={{ color: T.ink }}>{photoCounts.total}</b> photo{photoCounts.total === 1 ? "" : "s"}</span>
+          <span style={{ color: allBlocks.length && shotBrands === allBlocks.length ? T.green : T.sub }}>
+            <b style={{ color: allBlocks.length && shotBrands === allBlocks.length ? T.green : T.ink }}>{shotBrands}</b> of {allBlocks.length} brand{allBlocks.length === 1 ? "" : "s"} shot
+          </span>
         </div>
         <div style={{ height: 5, borderRadius: 999, background: T.navySoft, overflow: "hidden" }}><div style={{ width: (totalItems ? 100 * checked / totalItems : 0) + "%", height: "100%", background: T.green, transition: "width .25s" }} /></div>
       </div>
     </div>
     <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onFile} />
     <div style={{ flex: 1, overflowY: "auto", padding: 16, paddingBottom: 100 }}>
-      {!groups.length && <Card><Empty ui={ui} icon="Camera" title="No plan to check off" body="Photograph the work you did, then end the visit." /><Btn ui={ui} block kind="subtle" icon="Camera" onClick={() => takePhoto({ aisle: "—", items: [] })}>Take a photo</Btn></Card>}
+      {!groups.length && <Card><Empty ui={ui} icon="Camera" title="No plan to check off" body="Photograph the work you did, then end the visit." /><Btn ui={ui} block kind="subtle" icon="Camera" onClick={() => takePhoto({ aisle: "", brand: "", sectionId: null })}>Take a photo</Btn></Card>}
       {groups.map((g) => {
-        const k = groupKey(g);
         const gChecked = g.items.filter((it) => statuses[it.id]).length;
-        const gPhotos = photoCounts.byGroup[k] || 0;
-        return <Card key={k} pad={"12px 14px"}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontFamily: ui.HEAD, fontWeight: 700, fontSize: 15, color: T.ink }}>Aisle {g.aisle}{g.items[0] && g.items[0].sectionLabel ? <span style={{ color: T.sub, fontWeight: 600 }}> · {g.items[0].sectionLabel}</span> : null}</div>
-              <div style={{ fontSize: 12, color: gChecked === g.items.length ? T.green : T.mute, fontWeight: 600 }}>{gChecked}/{g.items.length} checked{gPhotos ? ` · ${gPhotos} photo${gPhotos === 1 ? "" : "s"}` : ""}</div>
-            </div>
-            <button onClick={() => takePhoto(g)} aria-label="Take photo" style={{ width: 42, height: 42, borderRadius: 12, border: `1px solid ${T.line}`, background: gPhotos ? T.greenSoft : "#fff", cursor: "pointer", display: "grid", placeItems: "center", position: "relative" }}>
-              <Icon ui={ui} name="Camera" size={20} color={gPhotos ? T.green : T.navy} />
-              {gPhotos > 0 && <span style={{ position: "absolute", top: -6, right: -6, minWidth: 18, height: 18, borderRadius: 999, background: T.green, color: "#fff", fontSize: 10.5, fontWeight: 800, display: "grid", placeItems: "center", padding: "0 4px" }}>{gPhotos}</span>}
-            </button>
+        return <Card key={g.aisle} pad={"12px 14px"}>
+          <div style={{ marginBottom: 6 }}>
+            <div style={{ fontFamily: ui.HEAD, fontWeight: 700, fontSize: 15, color: T.ink }}>{g.aisle && g.aisle !== "—" ? "Aisle " + g.aisle : "This store"}{g.items[0] && g.items[0].sectionLabel ? <span style={{ color: T.sub, fontWeight: 600 }}> · {g.items[0].sectionLabel}</span> : null}</div>
+            <div style={{ fontSize: 12, color: gChecked === g.items.length ? T.green : T.mute, fontWeight: 600 }}>{gChecked}/{g.items.length} checked</div>
           </div>
-          {(thumbs[k] || []).length > 0 && <div style={{ display: "flex", gap: 6, margin: "6px 0 4px", overflowX: "auto" }}>{thumbs[k].map((u, i) => <img key={i} src={u} alt="" style={{ width: 54, height: 54, objectFit: "cover", borderRadius: 8, border: `1px solid ${T.line}`, flexShrink: 0 }} />)}</div>}
-          {g.items.map((it) => {
+          {/* One block per BRAND in this aisle. The camera lives here, not on
+              the aisle and not on the SKU: one picture covers the brand where
+              it sits, and a brand that sits in three places gets three blocks
+              and can be photographed in each. */}
+          {brandBlocks(g).map((b) => {
+            const k = b.key;
+            const shots = photoCounts.byGroup[k] || 0;
+            return <div key={k} style={{ borderTop: `1px solid ${T.line}`, paddingTop: 10, marginTop: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: ui.HEAD, fontWeight: 700, fontSize: 14, color: shots ? T.green : T.ink }}>{b.brand}</div>
+                  <div style={{ fontSize: 11.5, color: T.mute }}>{b.items.length} item{b.items.length === 1 ? "" : "s"}{shots ? ` · ${shots} photo${shots === 1 ? "" : "s"}` : " · needs a photo"}</div>
+                </div>
+                <button onClick={() => takePhoto({ aisle: g.aisle, brand: b.brand, sectionId: b.sectionId })} aria-label={"Photo of " + b.brand}
+                  style={{ width: 44, height: 44, borderRadius: 12, border: `1.5px solid ${shots ? T.green : T.navy}`, background: shots ? T.greenSoft : "#fff", cursor: "pointer", display: "grid", placeItems: "center", position: "relative", flexShrink: 0 }}>
+                  <Icon ui={ui} name="Camera" size={20} color={shots ? T.green : T.navy} />
+                  {shots > 0 && <span style={{ position: "absolute", top: -6, right: -6, minWidth: 18, height: 18, borderRadius: 999, background: T.green, color: "#fff", fontSize: 10.5, fontWeight: 800, display: "grid", placeItems: "center", padding: "0 4px" }}>{shots}</span>}
+                </button>
+              </div>
+              {(thumbs[k] || []).length > 0 && <div style={{ display: "flex", gap: 6, margin: "0 0 8px", overflowX: "auto" }}>{thumbs[k].map((u, i) => <img key={i} src={u} alt="" style={{ width: 54, height: 54, objectFit: "cover", borderRadius: 8, border: `1px solid ${T.line}`, flexShrink: 0 }} />)}</div>}
+              {b.items.map((it) => {
             const cur = statuses[it.id];
-            return <div key={it.id} style={{ padding: "10px 0 8px", borderTop: `1px solid ${T.line}` }}>
+            return <div key={it.id} style={{ padding: "8px 0" }}>
               <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
                 <div style={{ fontWeight: 600, color: T.ink, fontSize: 14, flex: 1 }}>{it.name}</div>
                 {it.itemNo && <span style={{ fontSize: 11.5, color: T.mute }}>#{it.itemNo}</span>}
@@ -493,6 +522,8 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
                 })}
               </div>
             </div>;
+              })}
+            </div>;
           })}
         </Card>;
       })}
@@ -501,7 +532,11 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
       <Btn ui={ui} block kind="green" icon="Check" onClick={() => setConfirmEnd(true)}>End Visit</Btn>
     </div>
     {confirmEnd && <Sheet ui={ui} title="End this visit?" confirmLabel={ending ? "Ending…" : "End Visit"} confirmKind="green" onCancel={() => setConfirmEnd(false)} onConfirm={ending ? () => {} : endVisit}
-      body={<>You checked <b>{checked}</b> of {totalItems} items and took <b>{photoCounts.total}</b> photo{photoCounts.total === 1 ? "" : "s"}.{checked < totalItems && totalItems > 0 ? " Unchecked items are fine — they just won't count." : ""}</>} />}
+      body={<>
+        You checked <b>{checked}</b> of {totalItems} items and photographed <b>{shotBrands}</b> of {allBlocks.length} brand{allBlocks.length === 1 ? "" : "s"}.
+        {shotBrands < allBlocks.length ? <> {allBlocks.length - shotBrands} still {allBlocks.length - shotBrands === 1 ? "has" : "have"} no picture.</> : ""}
+        {checked < totalItems && totalItems > 0 ? " Unchecked items are fine — they just won't count." : ""}
+      </>} />}
   </div>;
 }
 
@@ -805,7 +840,7 @@ function StoresPanel({ ui, notify }) {
   const list = (stores || []).filter((s) => (showClosed || s.active) && (!q || String(s.name).toLowerCase().includes(q.toLowerCase()) || String(s.city || "").toLowerCase().includes(q.toLowerCase())));
   return <div>
     <PanelHead ui={ui} title="Stores" body="The stores a merchandiser can visit. Upload the spreadsheet straight from your export — it needs a header row with Name, and any of Address, City, State, Zip, Route, Chain, Store #. A title block above the headers is fine." />
-    <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 420px) 1fr", gap: 18, alignItems: "start" }}>
+    <div className="pf-2col">
       <Card>
         <H2 ui={ui} style={{ marginBottom: 10 }}>Upload</H2>
         <FileDrop ui={ui} file={file} busy={busy} onFile={onPick} />
@@ -859,7 +894,7 @@ function CatalogPanel({ ui, notify }) {
   const [plan, setPlan] = useState(null);
   const [sections, setSections] = useState([]);
   const [newSection, setNewSection] = useState("");
-  const [form, setForm] = useState({ productId: "", aisle: "", bay: "", shelf: "", sectionId: "", note: "" });
+  const [form, setForm] = useState({ aisle: "", bay: "", shelf: "", sectionId: "", note: "" });
   const [copyFrom, setCopyFrom] = useState("");
   const [confirm, setConfirm] = useState(null);
   const [prodFile, setProdFile] = useState(null);
@@ -870,6 +905,9 @@ function CatalogPanel({ ui, notify }) {
   const [prodPreview, setProdPreview] = useState(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [bulk, setBulk] = useState({ aisle: "", bay: "", shelf: "", sectionId: "", note: "" });
+  const [planQ, setPlanQ] = useState("");
+  const [planCat, setPlanCat] = useState("");
+  const [planSel, setPlanSel] = useState(new Set());
 
   function loadProducts() { jget(ui, "/api/products?limit=500").then((r) => setProducts((r && r.products) || [])); }
   function loadPlan(id) {
@@ -924,11 +962,16 @@ function CatalogPanel({ ui, notify }) {
     notify(`Cleared ${r.products} product${r.products === 1 ? "" : "s"}${r.planItems ? ` and ${r.planItems} plan row${r.planItems === 1 ? "" : "s"}` : ""}`);
     setPicked(new Set()); loadProducts(); loadPlan(storeId);
   }
-  async function addPlanItem() {
-    if (!storeId || !form.productId) return notify("Pick a product first", "error");
-    const r = await jpost(ui, "/api/stores/" + encodeURIComponent(storeId) + "/plan", { productId: form.productId, aisle: form.aisle, bay: form.bay, shelf: form.shelf, sectionId: form.sectionId || null, note: form.note });
+  function togglePlanSel(id) { setPlanSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
+  async function addPlanPicked() {
+    if (!storeId || !planSel.size) return notify("Pick a product first", "error");
+    const r = await jpost(ui, "/api/stores/" + encodeURIComponent(storeId) + "/plan",
+      { productIds: [...planSel], aisle: form.aisle, bay: form.bay, shelf: form.shelf, sectionId: form.sectionId || null, note: form.note });
     if (!r || r.error) return notify((r && r.error) || "Couldn't save", "error");
-    setForm((f) => ({ ...f, productId: "", bay: "", shelf: "", note: "" })); notify("Added to the plan"); loadPlan(storeId);
+    notify(`${r.added} added${r.skipped ? `, ${r.skipped} already there` : ""}`);
+    setPlanSel(new Set()); setPlanQ("");
+    setForm((f) => ({ ...f, bay: "", shelf: "", note: "" })); // keep aisle/section: the next run is usually the same spot
+    loadPlan(storeId);
   }
   async function addSection() {
     if (!newSection.trim()) return;
@@ -942,6 +985,15 @@ function CatalogPanel({ ui, notify }) {
     return true;
   });
   const storeName = (id) => { const s = stores.find((x) => x.id === id); return s ? s.name : id; };
+  // Products already on this store's plan, so the picker can say so instead
+  // of letting someone add a duplicate and wonder why nothing happened.
+  const onPlan = useMemo(() => new Set(((plan && plan.groups) || []).flatMap((g) => g.items.map((i) => i.productId))), [plan]);
+  const planPick = useMemo(() => (products || []).filter((p) => {
+    if (planCat && p.category !== planCat) return false;
+    if (!planQ) return true;
+    const q = planQ.toLowerCase();
+    return String(p.name).toLowerCase().includes(q) || String(p.brand || "").toLowerCase().includes(q) || String(p.itemNo || "").includes(q);
+  }).slice(0, 80), [products, planQ, planCat]);
   function togglePick(id) { setPicked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
   async function addPicked() {
     const r = await jpost(ui, "/api/stores/" + encodeURIComponent(storeId) + "/plan", Object.assign({ productIds: [...picked] }, bulk, { sectionId: bulk.sectionId || null }));
@@ -961,7 +1013,7 @@ function CatalogPanel({ ui, notify }) {
 
   return <div>
     <PanelHead ui={ui} title="Catalog & store plans" body="Products are the branch's catalog. A store plan is what a merchandiser checks off in that store — each row is a product and where it lives (aisle / bay / shelf). Sections are optional groupings like Cooler or Beer Cave; they're what time gets measured against." />
-    <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 400px) 1fr", gap: 18, alignItems: "start" }}>
+    <div className="pf-2col">
       <Card>
         <H2 ui={ui} style={{ marginBottom: 10 }}>Products {products ? <span style={{ color: T.mute, fontWeight: 600 }}>({products.length})</span> : null}</H2>
         <FileDrop ui={ui} file={prodFile} busy={prodBusy} onFile={pickProductFile} hint="Excel or CSV — Name, Item #, Brand, Pack, Category" />
@@ -1050,14 +1102,46 @@ function CatalogPanel({ ui, notify }) {
             {sections.map((s) => <Chip key={s.id} small label={s.label} onRemove={() => setConfirm({ title: `Remove section ${s.label}?`, body: "Items in it stay on the plan.", run: () => jpost(ui, "/api/sections/" + s.id + "/remove", {}).then(() => { notify("Section removed"); loadPlan(storeId); }) })} />)}
             <input value={newSection} onChange={(e) => setNewSection(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addSection(); }} placeholder="+ e.g. Cooler" style={Object.assign({}, inputStyle, { width: 130, padding: "4px 8px", fontSize: 12 })} />
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 70px 70px 70px 1fr 1fr auto", gap: 6, alignItems: "end", padding: 12, background: T.panel, borderRadius: 12, marginBottom: 12 }}>
-            <Field label="Product"><select value={form.productId} onChange={(e) => setForm({ ...form, productId: e.target.value })} style={inputStyle}><option value="">Choose…</option>{(products || []).map((p) => <option key={p.id} value={p.id}>{p.name}{p.itemNo ? ` (#${p.itemNo})` : ""}</option>)}</select></Field>
-            <Field label="Aisle"><input value={form.aisle} onChange={(e) => setForm({ ...form, aisle: e.target.value })} style={inputStyle} /></Field>
-            <Field label="Bay"><input value={form.bay} onChange={(e) => setForm({ ...form, bay: e.target.value })} style={inputStyle} /></Field>
-            <Field label="Shelf"><input value={form.shelf} onChange={(e) => setForm({ ...form, shelf: e.target.value })} style={inputStyle} /></Field>
-            <Field label="Section"><select value={form.sectionId} onChange={(e) => setForm({ ...form, sectionId: e.target.value })} style={inputStyle}><option value="">—</option>{sections.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}</select></Field>
-            <Field label="Note"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} placeholder="e.g. endcap" style={inputStyle} /></Field>
-            <Btn ui={ui} small onClick={addPlanItem} style={{ height: 40 }}>Add</Btn>
+          {/* Type to filter, tick what you want, add them all at one spot.
+              This replaced a 497-option <select> with no search, which is an
+              unusable control standing in a store -- which is where this
+              screen is actually used. */}
+          <div style={{ padding: 12, background: T.panel, borderRadius: 12, marginBottom: 12 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+              <input autoFocus value={planQ} onChange={(e) => setPlanQ(e.target.value)} placeholder="Type a product or brand…" style={Object.assign({}, inputStyle, { flex: 1, minWidth: 200 })} />
+              {[["", "All"], ["beer", "Beer"], ["na", "Non-alc"]].map(([v, label]) => (
+                <button key={v || "all"} onClick={() => setPlanCat(v)} style={{ padding: "6px 12px", borderRadius: 999, border: `1px solid ${planCat === v ? T.navy : T.line}`, background: planCat === v ? T.navySoft : "#fff", color: planCat === v ? T.navy : T.sub, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>{label}</button>
+              ))}
+            </div>
+            <div style={{ maxHeight: 210, overflowY: "auto", background: "#fff", border: `1px solid ${T.line}`, borderRadius: 10 }}>
+              {!planPick.length && <div style={{ fontSize: 12.5, color: T.mute, padding: "10px 12px" }}>{products && products.length ? "Nothing matches that." : "No products in the catalog yet."}</div>}
+              {planPick.map((p) => {
+                const on = planSel.has(p.id);
+                const already = onPlan.has(p.id);
+                return <div key={p.id} onClick={() => togglePlanSel(p.id)}
+                  style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderBottom: `1px solid ${T.line}`, cursor: "pointer", background: on ? T.navySoft : "#fff" }}>
+                  <input type="checkbox" checked={on} readOnly />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, color: T.ink, fontSize: 13.5 }}>{p.name}</div>
+                    <div style={{ fontSize: 11.5, color: T.mute }}>{[p.itemNo && "#" + p.itemNo, p.brand].filter(Boolean).join(" · ")}</div>
+                  </div>
+                  {already && <Badge tone="gray">on plan</Badge>}
+                  {p.category && <Badge tone={p.category === "beer" ? "navy" : "green"}>{p.category === "beer" ? "Beer" : "Non-alc"}</Badge>}
+                </div>;
+              })}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "80px 80px 80px 1fr 1fr auto", gap: 6, alignItems: "end", marginTop: 10 }}>
+              <Field label="Aisle"><input value={form.aisle} onChange={(e) => setForm({ ...form, aisle: e.target.value })} placeholder="Beer" style={inputStyle} /></Field>
+              <Field label="Bay"><input value={form.bay} onChange={(e) => setForm({ ...form, bay: e.target.value })} style={inputStyle} /></Field>
+              <Field label="Shelf"><input value={form.shelf} onChange={(e) => setForm({ ...form, shelf: e.target.value })} style={inputStyle} /></Field>
+              <Field label="Section"><select value={form.sectionId} onChange={(e) => setForm({ ...form, sectionId: e.target.value })} style={inputStyle}><option value="">—</option>{sections.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}</select></Field>
+              <Field label="Note"><input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} placeholder="e.g. endcap" style={inputStyle} /></Field>
+              <Btn ui={ui} small onClick={addPlanPicked} disabled={!planSel.size} style={{ height: 40 }}>Add {planSel.size || ""}</Btn>
+            </div>
+            {planSel.size > 0 && <div style={{ fontSize: 11.5, color: T.sub, marginTop: 8 }}>
+              {planSel.size} selected — they all land at the same spot. Leave <b>Aisle</b> blank if the beer aisle isn't numbered; the section name carries it.
+              <button onClick={() => setPlanSel(new Set())} style={{ background: "none", border: "none", color: T.navy, fontWeight: 700, cursor: "pointer", fontSize: 11.5 }}>clear</button>
+            </div>}
           </div>
           {plan && !plan.count && <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 12, border: `1px dashed ${T.line}`, borderRadius: 12 }}>
             <div style={{ flex: 1, fontSize: 13, color: T.sub }}>Nothing mapped yet. Start from a sibling store's plan?</div>
@@ -1185,6 +1269,17 @@ function secs(n) {
   const m = Math.round(n / 60);
   return m < 60 ? m + " min" : Math.floor(m / 60) + "h " + (m % 60) + "m";
 }
+// Photos fold into one row per (brand, place) -- the same unit the walk
+// asked for them in, so the manager reads them the way they were taken.
+function photosByBrand(photos) {
+  const by = new Map();
+  (photos || []).forEach((p) => {
+    const key = (p.brand || "").toLowerCase() + "|" + (p.aisle || "") + "|" + (p.sectionId || "");
+    if (!by.has(key)) by.set(key, { key, brand: p.brand || "", where: [p.aisle && "Aisle " + p.aisle, p.section].filter(Boolean).join(" · "), photos: [] });
+    by.get(key).photos.push(p);
+  });
+  return [...by.values()];
+}
 const STATUS_TONE = { stocked: "green", fixed: "green", out_of_stock: "red", not_carried: "gray" };
 const STATUS_LABEL = { stocked: "Stocked", fixed: "Fixed", out_of_stock: "Out of stock", not_carried: "Not carried" };
 
@@ -1236,14 +1331,25 @@ function VisitDetail({ ui, visitId, onClose }) {
           <Card>
             <H2 ui={ui} style={{ marginBottom: 8 }}>Photos</H2>
             {!d.photos.length && <div style={{ fontSize: 13, color: T.mute }}>No photos on this visit.</div>}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 }}>
-              {d.photos.map((p) => (
-                <button key={p.id} onClick={() => setZoom(p)} style={{ padding: 0, border: `1px solid ${T.line}`, borderRadius: 10, overflow: "hidden", background: "#fff", cursor: "zoom-in" }}>
-                  <img src={"/api/photos/" + p.id} alt="" loading="lazy" style={{ display: "block", width: "100%", height: 130, objectFit: "cover" }} />
-                  <div style={{ fontSize: 11, color: T.sub, padding: "5px 7px", textAlign: "left" }}>{p.section || "—"} · {fmtTime(p.takenAt)}</div>
-                </button>
-              ))}
-            </div>
+            {/* Grouped by brand, because that is what a photo covers now --
+                and a brand with several is the Liquid Death case, not a
+                duplicate. */}
+            {photosByBrand(d.photos).map((grp) => (
+              <div key={grp.key} style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: T.ink, marginBottom: 6 }}>
+                  {grp.brand || "Unlabelled"}
+                  <span style={{ color: T.mute, fontWeight: 500 }}>{grp.where ? " · " + grp.where : ""} · {grp.photos.length} photo{grp.photos.length === 1 ? "" : "s"}</span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 }}>
+                  {grp.photos.map((p) => (
+                    <button key={p.id} onClick={() => setZoom(p)} style={{ padding: 0, border: `1px solid ${T.line}`, borderRadius: 10, overflow: "hidden", background: "#fff", cursor: "zoom-in" }}>
+                      <img src={"/api/photos/" + p.id} alt="" loading="lazy" style={{ display: "block", width: "100%", height: 130, objectFit: "cover" }} />
+                      <div style={{ fontSize: 11, color: T.sub, padding: "5px 7px", textAlign: "left" }}>{fmtTime(p.takenAt)}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
           </Card>
 
           {d.sections.length > 0 && <Card>

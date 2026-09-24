@@ -328,4 +328,26 @@ async function migrateCategories(pool) {
   return { migration: "007_categories", columns: added };
 }
 
-module.exports = { migrateIdentity, migrateOps, migrateCatalog, migrateVisits, migratePoints, migrateCategories };
+/* A photo covers a BRAND where it sits, not a SKU.
+ *
+ * Owner rule (2026-09-24): a merchandiser marks every SKU stocked, but one
+ * picture per brand is enough, because a brand's SKUs sit together. The
+ * caveat is a brand like Liquid Death whose sparkling water, energy and tea
+ * live in three different parts of the store.
+ *
+ * So the unit is (brand, where it sits) rather than the brand alone. A brand
+ * that is all in one place is one card wanting one photo; Liquid Death is
+ * three cards wanting three. Same rule, no special case -- which is why
+ * `aisle` is stored beside `brand` rather than brand on its own.
+ */
+async function migratePhotoBrand(pool) {
+  const added = [];
+  for (const [name, ddl] of [["brand", "text"], ["aisle", "text"]]) {
+    await pool.query(`ALTER TABLE proof_photos ADD COLUMN IF NOT EXISTS ${name} ${ddl}`);
+    added.push("proof_photos." + name);
+  }
+  await pool.query("CREATE INDEX IF NOT EXISTS proof_photos_brand_idx ON proof_photos (visit_id, brand)");
+  return { migration: "008_photo_brand", columns: added };
+}
+
+module.exports = { migrateIdentity, migrateOps, migrateCatalog, migrateVisits, migratePoints, migrateCategories, migratePhotoBrand };
