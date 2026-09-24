@@ -10,8 +10,26 @@
  * drift, and offers to DROP them. It offered to drop `category` off 531
  * products.
  *
- * So: after any pull that adds a migration, run `npm run migrate` before
- * republishing. It is the whole fix -- an empty diff proposes nothing.
+ * CORRECTED 2026-09-24. The earlier version of this comment said to run this
+ * before republishing, "an empty diff proposes nothing". That is wrong, and it
+ * sends you to the wrong branch of the decision. On a deploy that ADDS a
+ * migration the two databases cannot agree until both have it, so the diff is
+ * never empty -- running this first only flips which way it points.
+ *
+ * READ THE PROPOSED SQL. The direction is the whole answer:
+ *
+ *   ADD COLUMN / CREATE INDEX / CREATE TABLE
+ *     Dev is ahead: prod has not booted the new build yet. APPROVE -- it is
+ *     the boot migration a minute early, and every statement schema.js runs
+ *     is IF NOT EXISTS, so the boot run still succeeds and records itself.
+ *
+ *   DROP / DELETE / a destructive ALTER
+ *     Prod is ahead: prod booted the new code, dev never ran it, and the
+ *     pipeline is reading prod's correct columns as drift. CANCEL, run this
+ *     script, republish. This is the `DROP COLUMN category` on 531 products.
+ *
+ * So the real use for this script is AFTER a deploy, to bring dev up to what
+ * prod already booted -- which is what stops the next publish proposing a drop.
  *
  * Prints what it applied and exits non-zero if anything failed, so it is
  * safe to chain after a pull.
