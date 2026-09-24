@@ -126,6 +126,71 @@ t("slug lowercases and strips punctuation", () => {
   assert.strictEqual(P.slug("Bud Light 1x18 12oz Can!"), "bud-light-1x18-12oz-can");
 });
 
+/* ---- VIP's Comparison export: the catalog Odessa actually has ----
+   Headers are Brands | Item Names | Item Name ID | Product Classes, and not
+   one of them matched the original synonym lists. The measured file is 920
+   rows / 621 brands / classes Beer 398, Non-Alcohol 466, Wine 54. */
+const VIP_HEADER = ["Brands", "Item Names", "Item Name ID", "Product Classes", ""];
+t("the VIP Comparison header maps all four columns", () => {
+  const m = P.prodColMap(VIP_HEADER);
+  assert.strictEqual(m.brand, 0, "brand");
+  assert.strictEqual(m.name, 1, "name");
+  assert.strictEqual(m.itemNo, 2, "itemNo");
+  assert.strictEqual(m.category, 3, "category");
+});
+t("'Item Name ID' is the item number, never the product name", () => {
+  // The synonym match must stay EXACT. A prefix/contains test would let
+  // "item name" claim the "Item Name ID" column and import ids as names.
+  const m = P.prodColMap(["Item Name ID", "Item Names"]);
+  assert.strictEqual(m.itemNo, 0);
+  assert.strictEqual(m.name, 1);
+});
+t("a header with only Brands and Item Names still maps", () => {
+  const m = P.prodColMap(["Brands", "Item Names"]);
+  assert.strictEqual(m.brand, 0); assert.strictEqual(m.name, 1);
+  assert.strictEqual(m.category, undefined);
+});
+t("normCategory reads VIP's own class spellings", () => {
+  assert.strictEqual(P.normCategory("Beer"), "beer");
+  assert.strictEqual(P.normCategory("Non-Alcohol"), "na");
+  assert.strictEqual(P.normCategory("Wine"), "wine");
+});
+t("Wine is its own category, not folded into either of the others", () => {
+  // 54 of 920 rows. Folding it into beer or NA is wrong in both directions;
+  // leaving it null drops it out of the time split without saying so.
+  assert.ok(P.PRODUCT_CATEGORIES.some((c) => c.id === "wine"));
+  assert.strictEqual(P.validCategory("wine"), "wine");
+  assert.strictEqual(P.categoryLabel("wine"), "Wine");
+});
+t("an unknown class stays null rather than being guessed", () => {
+  assert.strictEqual(P.normCategory("Novelty"), null);
+  assert.strictEqual(P.normCategory(""), null);
+  assert.strictEqual(P.normCategory(null), null);
+});
+
+/* ---- the export's own age ---- */
+t("the VIP trailer row yields the creation date", () => {
+  assert.strictEqual(P.exportCreatedOn([["Report Created on 9/24/2026 11:16:57 AM", "", "", "", ""]]), "2026-09-24");
+});
+t("the date is read M/D/YYYY, not D/M", () => {
+  // 3/9 is March 9th. Reading it as September 3rd moves every export before
+  // the 13th into another month and inverts any staleness verdict.
+  assert.strictEqual(P.exportCreatedOn([["Report Created on 3/9/2026 8:00:00 AM"]]), "2026-03-09");
+});
+t("a file that says nothing about itself yields null, never a guess", () => {
+  assert.strictEqual(P.exportCreatedOn([["Michelob Ultra", "Ultra 1x30 12oz Can", "18030", "Beer"]]), null);
+  assert.strictEqual(P.exportCreatedOn([]), null);
+  assert.strictEqual(P.exportCreatedOn(null), null);
+});
+t("age is a calendar-day difference, never elapsed hours", () => {
+  // The stamp carries no timezone. An hours-based age reads 5 on a Central
+  // laptop and 6 on a UTC server, so a test of it passes locally and fails
+  // in production.
+  assert.strictEqual(P.exportAgeDays("2026-09-24", "2026-09-24"), 0);
+  assert.strictEqual(P.exportAgeDays("2026-09-24", "2026-10-01"), 7);
+  assert.strictEqual(P.exportAgeDays(null, "2026-10-01"), null);
+});
+
 /* ---- role fence (proof/roles.js) ---- */
 const R = require("./roles");
 t("proofPathOk accepts /api/proof/*, /api/bootstrap, /api/logout", () => {

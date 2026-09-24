@@ -56,6 +56,10 @@ const POINTS_PER_VISIT = 10, POINTS_PER_PHOTO = 1, POINTS_PHOTO_CAP = 10;
 const PRODUCT_CATEGORIES = [
   { id: "beer", label: "Beer" },
   { id: "na", label: "Non-alc" },
+  // 54 of the 920 rows in Odessa's VIP catalog are Wine. Folding them into
+  // either of the other two would be wrong in both directions, and leaving
+  // them uncategorised drops them out of the beer-vs-NA time split entirely.
+  { id: "wine", label: "Wine" },
 ];
 function categoryLabel(id) { const c = PRODUCT_CATEGORIES.find((x) => x.id === id); return c ? c.label : (id || "Everything"); }
 function validCategory(id) { return id == null || id === "" ? null : (PRODUCT_CATEGORIES.some((c) => c.id === id) ? id : undefined); }
@@ -120,7 +124,18 @@ function colMap(header) {
   Object.keys(STORE_HEADERS).forEach((k) => { const i = norm.findIndex((h) => STORE_HEADERS[k].indexOf(h) !== -1); if (i !== -1) map[k] = i; });
   return map;
 }
-const PROD_HEADERS = { name: ["name", "product", "description"], brand: ["brand"], pack: ["pack", "package"], itemNo: ["item no", "itemno", "item#", "item #", "sku"], category: ["category", "cat", "class", "segment"] };
+/* Header spellings, exact-matched after lowercasing. The plural forms are
+   VIP's Comparison export, which is the catalog Odessa actually has:
+   Brands | Item Names | Item Name ID | Product Classes. Note "item name"
+   and "item name id" are different keys and must stay exact matches --
+   a prefix test would read the id column as the product name. */
+const PROD_HEADERS = {
+  name: ["name", "product", "description", "item names", "item name", "item description"],
+  brand: ["brand", "brands"],
+  pack: ["pack", "package"],
+  itemNo: ["item no", "itemno", "item#", "item #", "sku", "item name id", "item id"],
+  category: ["category", "cat", "class", "segment", "product classes", "product class", "class of trade"],
+};
 /* A spreadsheet says "Beer", "NA", "Non Alc", "N/A". Map the spellings people
    actually type; anything unrecognised is left null rather than guessed, and
    shows up as uncategorised on the Catalog screen. */
@@ -129,6 +144,7 @@ function normCategory(v) {
   if (!s) return null;
   if (/^(beer|malt|alc|alcohol|bud|domestic|import|craft)/.test(s)) return "beer";
   if (/^(na\b|n\/?a|non.?alc|nonalc|soft|water|energy|tea|juice|soda)/.test(s)) return "na";
+  if (/^(wine|wne|cider|sake)/.test(s)) return "wine";
   return null;
 }
 function prodColMap(header) {
@@ -137,6 +153,34 @@ function prodColMap(header) {
   Object.keys(PROD_HEADERS).forEach((k) => { const i = norm.findIndex((h) => PROD_HEADERS[k].indexOf(h) !== -1); if (i !== -1) map[k] = i; });
   return map;
 }
+/* VIP's exports carry their own age in a trailer row -- "Report Created on
+   9/24/2026 11:16:57 AM" in the first cell, with every other cell empty. The
+   row is skipped as a product (it has no name), so without this it is simply
+   thrown away, and a six-week-old export looks exactly like this morning's.
+   Returns YYYY-MM-DD, or null when the file says nothing about itself.
+   The date is M/D/YYYY: reading it D/M moves every export before the 13th
+   into another month and silently inverts the verdict. */
+function exportCreatedOn(rows) {
+  for (const r of (rows || [])) {
+    const cell = String((r && r[0]) || "");
+    const m = /report\s+created\s+on\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/i.exec(cell);
+    if (!m) continue;
+    const mo = Number(m[1]), da = Number(m[2]), yr = Number(m[3]);
+    if (mo < 1 || mo > 12 || da < 1 || da > 31) return null;
+    return yr + "-" + String(mo).padStart(2, "0") + "-" + String(da).padStart(2, "0");
+  }
+  return null;
+}
+/* Calendar days, never elapsed hours: the stamp carries no timezone, so an
+   hours-based age reads 5 on a laptop and 6 on the server. */
+function exportAgeDays(created, today) {
+  if (!created) return null;
+  const a = Date.UTC(...created.split("-").map((x, i) => i === 1 ? Number(x) - 1 : Number(x)));
+  const t = String(today || new Date().toISOString().slice(0, 10));
+  const b = Date.UTC(...t.split("-").map((x, i) => i === 1 ? Number(x) - 1 : Number(x)));
+  return Math.round((b - a) / 86400000);
+}
+
 function looksLikeHeader(row) {
   return row.some((c) => /[a-z]/i.test(String(c || ""))) && !row.every((c) => /^\d+$/.test(String(c || "").trim()));
 }
@@ -611,6 +655,7 @@ function create(deps) {
     const hasHeader = looksLikeHeader(rows[0]);
     const map = hasHeader ? prodColMap(rows[0]) : {};
     const body = hasHeader ? rows.slice(1) : rows;
+    const reportCreated = exportCreatedOn(body);
     let saved = 0, skipped = 0, categorised = 0;
     const keep = [];
     for (const r of body) {
@@ -641,6 +686,7 @@ function create(deps) {
 
     if (!o.apply) {
       return { ok: true, preview: true, parsed: saved, skipped, categorised, headerSeen: hasHeader,
+               reportCreated, reportAgeDays: exportAgeDays(reportCreated),
                existing: cur.rows.length, willClose: o.replace ? missing.length : 0,
                sample: keep.slice(0, 5).map((k) => ({ name: k[3], itemNo: k[2], brand: k[4] })) };
     }
@@ -1164,6 +1210,7 @@ module.exports = {
   create, ...ROLES,
   // Pure functions, exported for test-proof.js -- no DB, no network.
   resolveBlockStart, deriveProductId, dayBlocksFor, sectionSpans, colMap, prodColMap, looksLikeHeader, slug,
+  exportCreatedOn, exportAgeDays,
   PRODUCT_CATEGORIES, categoryLabel, validCategory, normCategory,
   TRUCK_START, DEFAULT_START,
 };

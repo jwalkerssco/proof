@@ -30,6 +30,22 @@ const TEAM_HEX = { slate: "#64748B", navy: "#0E1F3C", gold: "#E0B23C", green: "#
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0]; // business week: Monday first
 
+/* The ONE list of product categories in the client. It mirrors
+   PRODUCT_CATEGORIES in proof/index.js: the server validates against its copy,
+   this one renders. They were separate hardcoded pairs in six places, so a
+   third category would have appeared on some screens and not others -- the
+   filter chips would offer it while the badge beside the row still read
+   "Non-alc". Adding one is now a line here and a line there. */
+const CATS = [
+  { id: "beer", label: "Beer", tone: "navy", hex: T.navy },
+  { id: "na", label: "Non-alc", tone: "green", hex: T.green },
+  { id: "wine", label: "Wine", tone: "plum", hex: "#7A3E9D" },
+];
+function catOf(id) { return CATS.find((c) => c.id === id) || null; }
+function catLabel(id) { const c = catOf(id); return c ? c.label : null; }
+function catTone(id) { const c = catOf(id); return c ? c.tone : "gray"; }
+function catHex(id) { const c = catOf(id); return c ? c.hex : T.mute; }
+
 /* Every call FAILS SOFT into { error } -- never a thrown promise. A phone in
    a store drops its connection routinely, and an unhandled reject puts a red
    stack over the whole app instead of a message the person can act on. A
@@ -106,7 +122,7 @@ function Btn({ ui, kind, small, block, disabled, onClick, children, style, icon 
   return <button disabled={disabled} onClick={onClick} style={Object.assign({}, base, skins[kind || "primary"], style || {})}>{icon && <Icon ui={ui} name={icon} size={small ? 14 : 17} color={(skins[kind || "primary"]).color} />}{children}</button>;
 }
 function Badge({ children, tone }) {
-  const tones = { green: [T.greenSoft, T.green], red: [T.redSoft, T.red], amber: [T.amberSoft, T.amber], navy: [T.navySoft, T.navy], gray: [T.panel, T.sub] };
+  const tones = { green: [T.greenSoft, T.green], red: [T.redSoft, T.red], amber: [T.amberSoft, T.amber], navy: [T.navySoft, T.navy], plum: ["#F3EAF8", "#7A3E9D"], gray: [T.panel, T.sub] };
   const [bg, fg] = tones[tone || "gray"];
   return <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 999, background: bg, color: fg, fontSize: 11, fontWeight: 700, letterSpacing: 0.3, whiteSpace: "nowrap" }}>{children}</span>;
 }
@@ -344,7 +360,6 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
 
   const groups = (detail && detail.plan && detail.plan.groups) || [];
   const totalItems = groups.reduce((n, g) => n + g.items.length, 0);
-  const CATS = [{ id: "beer", label: "Beer" }, { id: "na", label: "Non-alc" }];
   const planCats = CATS.filter((c) => ((detail && detail.plan && detail.plan.categories) || []).indexOf(c.id) !== -1);
 
   /* Brands within one aisle, in the order the plan lists them. The KEY is
@@ -444,8 +459,8 @@ function StoreFlow({ ui, storeId, storeName, openVisit, notify, onExit, onFinish
             {planCats.length > 1 ? <Card>
               <Eyebrow ui={ui}>What are you working?</Eyebrow>
               <div style={{ display: "grid", gap: 8 }}>
-                {planCats.map((c) => (
-                  <Btn key={c.id} ui={ui} block kind={c.id === "beer" ? "primary" : "ghost"} disabled={starting} onClick={() => startVisit(c.id)}>
+                {planCats.map((c, i) => (
+                  <Btn key={c.id} ui={ui} block kind={i === 0 ? "primary" : "ghost"} disabled={starting} onClick={() => startVisit(c.id)}>
                     {starting ? "Starting…" : c.label}
                   </Btn>
                 ))}
@@ -1007,7 +1022,7 @@ function CatalogPanel({ ui, notify }) {
     const r = await jpost(ui, "/api/products/category", { ids, category });
     if (!r || r.error) return notify((r && r.error) || "Couldn't set that", "error");
     setPicked(new Set());
-    notify(`${r.updated} product${r.updated === 1 ? "" : "s"} marked ${category === "beer" ? "Beer" : "Non-alc"}`);
+    notify(`${r.updated} product${r.updated === 1 ? "" : "s"} marked ${catLabel(category) || category}`);
     loadProducts();
   }
 
@@ -1021,6 +1036,12 @@ function CatalogPanel({ ui, notify }) {
         {prodPreview && <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: T.navySoft, color: T.ink, fontSize: 13, lineHeight: 1.6 }}>
           <b>{prodPreview.parsed}</b> product{prodPreview.parsed === 1 ? "" : "s"} read{prodPreview.sheet ? <> from sheet <b>{prodPreview.sheet}</b></> : null}{prodPreview.skipped ? <>, {prodPreview.skipped} row{prodPreview.skipped === 1 ? "" : "s"} without a name skipped</> : null}.
           {prodPreview.categorised > 0 && <div>{prodPreview.categorised} carry a category.</div>}
+          {/* VIP stamps its own creation date in a trailer row. Show it: an
+              export that has been sitting in Downloads for six weeks reads
+              identically to this morning's once it is parsed. */}
+          {prodPreview.reportCreated && <div style={{ color: prodPreview.reportAgeDays > 14 ? T.red : prodPreview.reportAgeDays > 7 ? T.amber : T.sub, fontWeight: prodPreview.reportAgeDays > 7 ? 700 : 400 }}>
+            VIP created this export on <b>{prodPreview.reportCreated}</b>{prodPreview.reportAgeDays > 0 ? ` — ${prodPreview.reportAgeDays} day${prodPreview.reportAgeDays === 1 ? "" : "s"} old` : " — today"}.
+          </div>}
           {prodPreview.sample && prodPreview.sample.length > 0 && <div style={{ color: T.sub, fontSize: 12, marginTop: 4 }}>First rows: {prodPreview.sample.map((s) => s.name).join(", ")}</div>}
           {prodPreview.willClose > 0 && <div style={{ marginTop: 4 }}>Replacing would retire <b>{prodPreview.willClose}</b> product{prodPreview.willClose === 1 ? "" : "s"} not in this file.</div>}
         </div>}
@@ -1037,14 +1058,13 @@ function CatalogPanel({ ui, notify }) {
             no export arrives with our own split -- so it is a multi-select
             plus one button rather than editing products one at a time. */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-          {[["", "All"], ["beer", "Beer"], ["na", "Non-alc"], ["none", "Uncategorised"]].map(([v, label]) => (
+          {[["", "All"]].concat(CATS.map((c) => [c.id, c.label]), [["none", "Uncategorised"]]).map(([v, label]) => (
             <button key={v || "all"} onClick={() => setCatFilter(v)} style={{ padding: "4px 10px", borderRadius: 999, border: `1px solid ${catFilter === v ? T.navy : T.line}`, background: catFilter === v ? T.navySoft : "#fff", color: catFilter === v ? T.navy : T.sub, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>{label}</button>
           ))}
           <div style={{ flex: 1 }} />
           {picked.size > 0 && <>
             <span style={{ fontSize: 12, color: T.sub }}>{picked.size} picked</span>
-            <Btn ui={ui} small onClick={() => setCategory("beer")}>Mark Beer</Btn>
-            <Btn ui={ui} small kind="ghost" onClick={() => setCategory("na")}>Mark Non-alc</Btn>
+            {CATS.map((c, i) => <Btn key={c.id} ui={ui} small kind={i === 0 ? "primary" : "ghost"} onClick={() => setCategory(c.id)}>Mark {c.label}</Btn>)}
           </>}
         </div>
         <div style={{ maxHeight: 420, overflowY: "auto", marginTop: 6 }}>
@@ -1057,7 +1077,7 @@ function CatalogPanel({ ui, notify }) {
           {visible.map((p) => <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 2px", borderTop: `1px solid ${T.line}`, fontSize: 13 }}>
             <input type="checkbox" checked={picked.has(p.id)} onChange={() => togglePick(p.id)} />
             <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontWeight: 600, color: T.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div><div style={{ fontSize: 11.5, color: T.mute }}>{[p.itemNo && "#" + p.itemNo, p.brand, p.pack].filter(Boolean).join(" · ")}</div></div>
-            {p.category ? <Badge tone={p.category === "beer" ? "navy" : "green"}>{p.category === "beer" ? "Beer" : "Non-alc"}</Badge> : <Badge tone="amber">Uncategorised</Badge>}
+            {p.category ? <Badge tone={catTone(p.category)}>{catLabel(p.category) || p.category}</Badge> : <Badge tone="amber">Uncategorised</Badge>}
             <button onClick={() => setConfirm({ title: `Remove ${p.name}?`, body: "It comes off every store plan too.", run: () => jpost(ui, "/api/products/" + encodeURIComponent(p.id) + "/remove", {}).then(() => { notify("Product removed"); loadProducts(); loadPlan(storeId); }) })} aria-label="Remove" style={{ background: "none", border: "none", cursor: "pointer", padding: 4, lineHeight: 0 }}><Icon ui={ui} name="Trash2" size={14} color={T.mute} /></button>
           </div>)}
         </div>
@@ -1109,7 +1129,7 @@ function CatalogPanel({ ui, notify }) {
           <div style={{ padding: 12, background: T.panel, borderRadius: 12, marginBottom: 12 }}>
             <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
               <input autoFocus value={planQ} onChange={(e) => setPlanQ(e.target.value)} placeholder="Type a product or brand…" style={Object.assign({}, inputStyle, { flex: 1, minWidth: 200 })} />
-              {[["", "All"], ["beer", "Beer"], ["na", "Non-alc"]].map(([v, label]) => (
+              {[["", "All"]].concat(CATS.map((c) => [c.id, c.label])).map(([v, label]) => (
                 <button key={v || "all"} onClick={() => setPlanCat(v)} style={{ padding: "6px 12px", borderRadius: 999, border: `1px solid ${planCat === v ? T.navy : T.line}`, background: planCat === v ? T.navySoft : "#fff", color: planCat === v ? T.navy : T.sub, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>{label}</button>
               ))}
             </div>
@@ -1126,7 +1146,7 @@ function CatalogPanel({ ui, notify }) {
                     <div style={{ fontSize: 11.5, color: T.mute }}>{[p.itemNo && "#" + p.itemNo, p.brand].filter(Boolean).join(" · ")}</div>
                   </div>
                   {already && <Badge tone="gray">on plan</Badge>}
-                  {p.category && <Badge tone={p.category === "beer" ? "navy" : "green"}>{p.category === "beer" ? "Beer" : "Non-alc"}</Badge>}
+                  {p.category && <Badge tone={catTone(p.category)}>{catLabel(p.category) || p.category}</Badge>}
                 </div>;
               })}
             </div>
@@ -1460,7 +1480,7 @@ function ReportingPanel({ ui }) {
   return <div>
     <PanelHead ui={ui} title="Reporting" body="Where the time goes. Only visits ended by pressing End Visit count by default — a visit closed by the nightly sweep or from the next store's parking lot is a known unknown, not a measurement." />
     <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-      {[["stores", "By store"], ["categories", "Beer vs Non-alc"], ["brands", "Effort by brand"]].map(([id, label]) => (
+      {[["stores", "By store"], ["categories", "Time by category"], ["brands", "Effort by brand"]].map(([id, label]) => (
         <button key={id} onClick={() => setTab(id)} style={{ padding: "7px 14px", borderRadius: 9, border: `1px solid ${tab === id ? T.navy : T.line}`, background: tab === id ? T.navy : "#fff", color: tab === id ? "#fff" : T.sub, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>{label}</button>
       ))}
     </div>
@@ -1487,7 +1507,7 @@ function ReportingPanel({ ui }) {
       {cats && !cats.rows.length && <Empty ui={ui} icon="Clock" title="No finished visits in this range" body="Once merchandisers pick Beer or Non-alc at Start Visit, the split lands here." />}
       {cats && cats.rows.length > 0 && <>
         <div style={{ display: "flex", height: 26, borderRadius: 7, overflow: "hidden", marginBottom: 14, border: `1px solid ${T.line}` }}>
-          {cats.rows.map((r) => <div key={r.category || "unset"} title={`${r.label}: ${r.minutes} min`} style={{ width: (r.sharePct || 0) + "%", background: r.category === "beer" ? T.navy : r.category === "na" ? T.green : T.mute, color: "#fff", fontSize: 11, fontWeight: 700, display: "grid", placeItems: "center" }}>{(r.sharePct || 0) >= 8 ? r.sharePct + "%" : ""}</div>)}
+          {cats.rows.map((r) => <div key={r.category || "unset"} title={`${r.label}: ${r.minutes} min`} style={{ width: (r.sharePct || 0) + "%", background: catHex(r.category), color: "#fff", fontSize: 11, fontWeight: 700, display: "grid", placeItems: "center" }}>{(r.sharePct || 0) >= 8 ? r.sharePct + "%" : ""}</div>)}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 90px 90px 90px 110px", gap: 12, padding: "4px 4px 8px", fontSize: 11.5, fontWeight: 700, color: T.mute, textTransform: "uppercase", letterSpacing: 0.5 }}>
           <div>Category</div><div style={{ textAlign: "right" }}>Visits</div><div style={{ textAlign: "right" }}>Items</div><div style={{ textAlign: "right" }}>Avg visit</div><div style={{ textAlign: "right" }}>Total time</div>
@@ -1514,7 +1534,7 @@ function ReportingPanel({ ui }) {
         </div>
         {brands.rows.map((r) => <div key={r.brand + (r.category || "")} style={{ display: "grid", gridTemplateColumns: "1fr 110px 90px 110px 110px", gap: 12, padding: "9px 4px", borderTop: `1px solid ${T.line}`, fontSize: 13.5 }}>
           <div style={{ fontWeight: 600, color: T.ink }}>{r.brand}</div>
-          <div>{r.category ? <Badge tone={r.category === "beer" ? "navy" : "green"}>{r.categoryLabel}</Badge> : <span style={{ color: T.mute, fontSize: 12 }}>—</span>}</div>
+          <div>{r.category ? <Badge tone={catTone(r.category)}>{r.categoryLabel}</Badge> : <span style={{ color: T.mute, fontSize: 12 }}>—</span>}</div>
           <div style={{ textAlign: "right" }}>{r.items}</div>
           <div style={{ textAlign: "right" }}>{secs(r.medianSeconds)}</div>
           <div style={{ textAlign: "right", fontWeight: 700 }}>{r.minutes} min</div>
